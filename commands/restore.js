@@ -162,7 +162,7 @@ export default class Restore {
                 'ps',
                 '-a',
                 '--filter',
-                'name=appwrite',
+                'label=com.docker.compose.project=appwrite',
                 '--format',
                 '{{.ID}}',
             ]);

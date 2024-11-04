@@ -1,0 +1,38 @@
+{
+  "name": "@itznotabug/abr",
+  "version": "1.0.0",
+  "description": "A CLI tool to backup and restore your Appwrite instances with ease!",
+  "type": "module",
+  "main": "index.js",
+  "author": "@itznotabug",
+  "bin": {
+    "abr": "index.js"
+  },
+  "prettier": {
+    "tabWidth": 4,
+    "singleQuote": true
+  },
+  "scripts": {
+    "lint": "prettier --check .",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "cli-table3": "^0.6.5",
+    "execa": "^9.5.1",
+    "inquirer": "^12.0.1",
+    "loading-cli": "^1.1.2",
+    "yargs": "^17.7.2"
+  },
+  "devDependencies": {
+    "@types/yargs": "^17.0.33",
+    "prettier": "^3.3.3"
+  },
+  "keywords": [
+    "ABR",
+    "Appwrite",
+    "Appwrite Backup",
+    "Appwrite Restore",
+    "Appwrite Backup Restore"
+  ]
+}

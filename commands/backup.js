@@ -16,7 +16,7 @@ import {
 const loader = loading('');
 
 export default class Backup {
-    static backupType;
+    static #backupType;
 
     /**
      * The backup command for `yargs` to manage.
@@ -35,20 +35,20 @@ export default class Backup {
      * Starts task once yargs receives the command.
      */
     static async #performTask() {
-        this.backupType = '';
+        this.#backupType = '';
 
         if (!(await checkDocker(loader))) return;
         if (!this.#checkForAppwriteFolder()) return;
         await this.#checkVolumeSizes();
         await this.#performBackup();
 
-        if (this.backupType === 'cold-backup') {
+        if (this.#backupType === 'cold-backup') {
             await restartAppwriteStack(loader);
-        } else if (this.backupType === 'semi-hot-backup') {
+        } else if (this.#backupType === 'semi-hot-backup') {
             await resumeAppwriteStack(loader);
         }
 
-        this.backupType = '';
+        this.#backupType = '';
     }
 
     /**
@@ -138,7 +138,7 @@ export default class Backup {
     static async #performBackup() {
         console.log('\n');
 
-        while (!this.backupType || this.backupType.length === 0) {
+        while (!this.#backupType || this.#backupType.length === 0) {
             const response = await inquirer.prompt([
                 {
                     type: 'checkbox',
@@ -148,10 +148,10 @@ export default class Backup {
                 },
             ]);
 
-            this.backupType = response.backupType[0];
+            this.#backupType = response.backupType[0];
         }
 
-        if (this.backupType === 'cold-backup') {
+        if (this.#backupType === 'cold-backup') {
             loader.start(chalk.blue('Stopping Appwrite services...'));
             try {
                 await execa('docker', ['compose', 'down'], {
@@ -169,7 +169,7 @@ export default class Backup {
                 );
                 return;
             }
-        } else if (this.backupType === 'semi-hot-backup') {
+        } else if (this.#backupType === 'semi-hot-backup') {
             loader.start(chalk.blue('Pausing Appwrite services...'));
             try {
                 await execa('docker', ['compose', 'pause'], {

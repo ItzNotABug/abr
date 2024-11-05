@@ -1,8 +1,19 @@
 # #ABR - Appwrite Backup Restore
 
-A powerful CLI tool for managing backups and restores of your Appwrite instance.\
-`#ABR` provides an easy and reliable way to back up all Appwrite data, including volumes and configurations, and restore
-them as needed.
+![GitHub stars](https://img.shields.io/github/stars/ItzNotABug/abr?style=flat)
+![GitHub forks](https://img.shields.io/github/forks/ItzNotABug/abr?style=flat)
+![GitHub issues](https://img.shields.io/github/issues/ItzNotABug/abr)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/ItzNotABug/abr)
+![GitHub license](https://img.shields.io/github/license/ItzNotABug/abr)
+![GitHub Release](https://img.shields.io/github/v/release/ItzNotABug/abr)
+![Source CI](https://img.shields.io/github/actions/workflow/status/ItzNotABug/abr/source-ci.yaml?label=source-build)
+![NPM Downloads](https://img.shields.io/npm/dm/@itznotabug/abr)
+![Node.js](https://img.shields.io/badge/Node.js-brightgreen?style=flat&logo=node.js&logoColor=white)
+![Appwrite](https://img.shields.io/badge/Appwrite-FD366E?style=flat&logo=appwrite&logoColor=white)
+
+`#ABR` is powerful CLI tool for managing backups and restores of your Appwrite instance.\
+The package provides an easy and reliable way to back up all Appwrite data, including volumes and configurations, and
+restore them as needed.
 
 ## Installation
 
@@ -31,36 +42,20 @@ npm install -g @itznotabug/abr
 
 ## Considerations
 
-1. **Downtime During Backups**:\
-   Backups require the Appwrite services to be stopped, which will result in a temporary downtime. Please account for
-   this
-   downtime based on the size of your databases and the projects you are backing up, as larger databases may take longer
-   to process.
-
-
-2. **Downtime During Restores**:\
+1. **Downtime During Restores**:\
    Restores require Appwrite services to be reinstalled and set up anew, leading to temporary downtime. Plan accordingly
    to minimize disruption, especially for production environments.
 
 
-3. **Cross Server Restores**:\
+2. **Cross Server Restores**:\
    If you backed up an Appwrite instance running on `https://abc.com` but later restore it on   `https://xyz.com`, make
    sure to update your `.env` file accordingly and perform a restart via `docker compose up -d`!
 
 
-4. **Edge Cases**:\
+3. **Edge Cases**:\
    Not all machines, environments, and Docker setups are identical. Some configurations might behave differently,
    especially if you're using tools like `Portainer`, `Coolify` or something other. `#ABR` is primarily tested on a
    standard Docker setup.
-
-### Why the downtimes?
-
-If Appwrite services are running and actively modifying data during a backup, there's a risk of capturing an
-inconsistent state. For example, the database might be in the middle of a transaction when the backup is made, which
-could lead to data corruption or inconsistencies in the backup.
-
-For best results, it's recommended to schedule routine maintenance windows to perform backups and restores with minimal
-disruption.
 
 ## Support the Project
 

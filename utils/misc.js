@@ -37,6 +37,24 @@ export const appwriteVolumes = [
 ];
 
 /**
+ * Backup types.
+ */
+export const backupTypes = [
+    {
+        value: 'hot-backup',
+        name: `${chalk.bold('Hot Backup')} - Fast, Zero Downtime ${chalk.red.bold('(Experimental – Keeps Appwrite running; potential data inconsistency)')}`,
+    },
+    {
+        value: 'semi-cold-backup',
+        name: `${chalk.bold('Semi-Cold Backup')} - Minimal Downtime, Ensured Consistency ${chalk.yellow.bold('(Pauses Appwrite briefly for data safety)')}`,
+    },
+    {
+        value: 'cold-backup',
+        name: `${chalk.bold('Cold Backup')} - Slow, Full Consistency ${chalk.green.bold('(Brief downtime; stops Appwrite for guaranteed data consistency)')}`,
+    },
+];
+
+/**
  * Checks if `Docker` is installed and running.
  */
 export async function checkDocker(loader) {
@@ -82,6 +100,27 @@ export async function restartAppwriteStack(loader) {
         loader.stop();
         console.error(
             chalk.red('❌ Error during Appwrite restart:'),
+            error.message,
+        );
+    }
+}
+
+/**
+ * Resumes the appwrite stack.
+ */
+export async function resumeAppwriteStack(loader) {
+    loader.start(chalk.blue('Resuming appwrite'));
+    try {
+        await execa('docker', ['compose', 'unpause'], {
+            cwd: path.join(process.cwd(), 'appwrite'),
+        });
+
+        loader.stop();
+        console.log(chalk.green('✅ Appwrite stack resumed.'));
+    } catch (error) {
+        loader.stop();
+        console.error(
+            chalk.red('❌ Error during Appwrite resumption:'),
             error.message,
         );
     }

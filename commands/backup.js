@@ -7,13 +7,17 @@ import inquirer from 'inquirer';
 import loading from 'loading-cli';
 import {
     appwriteVolumes,
+    backupTypes,
     checkDocker,
     restartAppwriteStack,
+    resumeAppwriteStack,
 } from '../utils/misc.js';
 
 const loader = loading('');
 
 export default class Backup {
+    static backupType;
+
     /**
      * The backup command for `yargs` to manage.
      */
@@ -31,11 +35,20 @@ export default class Backup {
      * Starts task once yargs receives the command.
      */
     static async #performTask() {
+        this.backupType = '';
+
         if (!(await checkDocker(loader))) return;
         if (!this.#checkForAppwriteFolder()) return;
         await this.#checkVolumeSizes();
         await this.#performBackup();
-        await restartAppwriteStack(loader);
+
+        if (this.backupType === 'cold-backup') {
+            await restartAppwriteStack(loader);
+        } else if (this.backupType === 'semi-cold-backup') {
+            await resumeAppwriteStack(loader);
+        }
+
+        this.backupType = '';
     }
 
     /**
@@ -123,34 +136,62 @@ export default class Backup {
      * @see appwriteVolumes
      */
     static async #performBackup() {
-        let shouldStopAndMoveAhead;
+        console.log('\n');
 
-        while (!shouldStopAndMoveAhead || shouldStopAndMoveAhead.length === 0) {
+        while (!this.backupType || this.backupType.length === 0) {
             const response = await inquirer.prompt([
                 {
-                    type: 'confirm',
-                    name: 'shouldStopAndMoveAhead',
-                    message:
-                        'Backup requires stopping the Appwrite service which may cause a slight downtime, please confirm:',
-                    default: true,
+                    type: 'checkbox',
+                    name: 'backupType',
+                    message: 'Select the type of backup',
+                    choices: backupTypes,
                 },
             ]);
 
-            shouldStopAndMoveAhead = response.shouldStopAndMoveAhead;
+            this.backupType = response.backupType[0];
         }
 
-        if (!shouldStopAndMoveAhead) return;
+        if (this.backupType === 'cold-backup') {
+            loader.start(chalk.blue('Stopping Appwrite services...'));
+            try {
+                await execa('docker', ['compose', 'down'], {
+                    cwd: path.join(process.cwd(), 'appwrite'),
+                });
 
-        loader.start(chalk.blue('Stopping Appwrite services...'));
+                loader.stop();
+                console.log(chalk.green('✅ Appwrite services stopped.'));
+            } catch (error) {
+                loader.stop();
+
+                console.log(
+                    chalk.red('❌ Error stopping Appwrite services:'),
+                    error.message,
+                );
+                return;
+            }
+        } else if (this.backupType === 'semi-cold-backup') {
+            loader.start(chalk.blue('Pausing Appwrite services...'));
+            try {
+                await execa('docker', ['compose', 'pause'], {
+                    cwd: path.join(process.cwd(), 'appwrite'),
+                });
+
+                loader.stop();
+                console.log(chalk.green('✅ Appwrite services paused.'));
+            } catch (error) {
+                loader.stop();
+
+                if (!error.message.includes('already paused')) {
+                    console.log(
+                        chalk.red('❌ Error pausing Appwrite services:'),
+                        error.message,
+                    );
+                    return;
+                }
+            }
+        }
 
         try {
-            await execa('docker-compose', ['down'], {
-                cwd: path.join(process.cwd(), 'appwrite'),
-            });
-
-            loader.stop();
-            console.log(chalk.green('✅ Appwrite services stopped.'));
-
             loader.start('Starting backup process...');
 
             const backupPath = path.join(process.cwd(), 'backups');

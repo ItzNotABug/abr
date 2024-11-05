@@ -4,9 +4,6 @@ A powerful CLI tool for managing backups and restores of your Appwrite instance.
 `#ABR` provides an easy and reliable way to back up all Appwrite data, including volumes and configurations, and restore
 them as needed.
 
-> [!NOTE]
-> This product is still in testing phase and is not released on NPM yet.
-
 ## Installation
 
 Install the CLI tool globally using `npm`:

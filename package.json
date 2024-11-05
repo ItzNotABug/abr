@@ -1,6 +1,6 @@
 {
   "name": "@itznotabug/abr",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "A CLI tool to backup and restore your Appwrite instances with ease!",
   "type": "module",
   "main": "index.js",

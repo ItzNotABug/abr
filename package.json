@@ -1,16 +1,22 @@
 {
   "name": "@itznotabug/abr",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "A CLI tool to backup and restore your Appwrite instances with ease!",
+  "author": "@itznotabug",
   "type": "module",
   "main": "index.js",
-  "author": "@itznotabug",
+  "license": "Apache-2.0",
   "bin": {
     "abr": "index.js"
   },
   "prettier": {
     "tabWidth": 4,
     "singleQuote": true
+  },
+  "homepage": "https://github.com/itznotabug/abr",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/itznotabug/abr.git"
   },
   "scripts": {
     "lint": "prettier --check .",

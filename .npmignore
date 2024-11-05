@@ -1,2 +1,9 @@
-.github
+# files
+*.sh
+*.iml
 .prettierignore
+
+#folders
+.idea
+.github
+node_modules

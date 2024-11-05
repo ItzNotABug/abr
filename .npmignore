@@ -3,6 +3,9 @@
 *.iml
 .prettierignore
 
+# md file
+LICENSE.md
+
 #folders
 .idea
 .github

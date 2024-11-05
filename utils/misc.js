@@ -45,8 +45,8 @@ export const backupTypes = [
         name: `${chalk.bold('Hot Backup')} - Fast, Zero Downtime ${chalk.red.bold('(Experimental – Keeps Appwrite running; potential data inconsistency)')}`,
     },
     {
-        value: 'semi-cold-backup',
-        name: `${chalk.bold('Semi-Cold Backup')} - Minimal Downtime, Ensured Consistency ${chalk.yellow.bold('(Pauses Appwrite briefly for data safety)')}`,
+        value: 'semi-hot-backup',
+        name: `${chalk.bold('Semi-Hot Backup')} - Minimal Downtime, Ensured Consistency ${chalk.yellow.bold('(Pauses Appwrite briefly for data safety)')}`,
     },
     {
         value: 'cold-backup',

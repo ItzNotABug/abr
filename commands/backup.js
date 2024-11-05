@@ -44,7 +44,7 @@ export default class Backup {
 
         if (this.backupType === 'cold-backup') {
             await restartAppwriteStack(loader);
-        } else if (this.backupType === 'semi-cold-backup') {
+        } else if (this.backupType === 'semi-hot-backup') {
             await resumeAppwriteStack(loader);
         }
 
@@ -169,7 +169,7 @@ export default class Backup {
                 );
                 return;
             }
-        } else if (this.backupType === 'semi-cold-backup') {
+        } else if (this.backupType === 'semi-hot-backup') {
             loader.start(chalk.blue('Pausing Appwrite services...'));
             try {
                 await execa('docker', ['compose', 'pause'], {

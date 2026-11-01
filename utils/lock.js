@@ -3,8 +3,9 @@ import chalk from 'chalk';
 
 /**
  * Held as a listening socket on this port, the kernel frees it when the process ends, however it ends.
+ * Below the ephemeral ranges, so random published & outgoing ports never take it.
  */
-const lockPort = 47391;
+const lockPort = 31991;
 
 /**
  * Takes the lock against concurrent ABR runs on this host, released on exit.
@@ -14,12 +15,13 @@ const lockPort = 47391;
  */
 export function acquireLock() {
     return new Promise((resolve) => {
-        const server = net.createServer();
+        // connections are closed right away, they would keep ABR from exiting.
+        const server = net.createServer((socket) => socket.destroy());
         server.once('error', (error) => {
             console.error(
                 chalk.red(
                     error.code === 'EADDRINUSE'
-                        ? `❌ Another ABR run is in progress (port ${lockPort} on 127.0.0.1 is held).`
+                        ? `❌ Another ABR run is in progress (port ${lockPort} on 127.0.0.1 is in use).`
                         : `❌ Could not take the lock on port ${lockPort}: ${error.message}`,
                 ),
             );

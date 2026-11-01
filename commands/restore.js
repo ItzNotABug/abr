@@ -179,7 +179,9 @@ export default class Restore {
         // names become `docker run -v` sources, anything else could be a host path.
         const volumeName = /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/;
         // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
-        const entry = /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s"((?:[^"\\]|\\.)*)"/;
+        // numeric owners, so a crafted user name can't look like the quoted name.
+        const entry =
+            /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s+"((?:[^"\\]|\\.)*)"(?: -> "(?:[^"\\]|\\.)*")?$/;
         try {
             // with the extractor's tar, which reads it the same way. streamed, archives can hold millions of files.
             const listing = docker(
@@ -188,10 +190,13 @@ export default class Restore {
                         entrypoint: 'tar',
                         image: extractorImage,
                         mounts: [`${path.dirname(file)}:/archive:ro`],
+                        // escaped bytes for non-ASCII names, whatever the image's locale.
+                        env: ['LANG=C'],
                     },
                     '-tvzPf',
                     `/archive/${path.basename(file)}`,
                     '--quoting-style=c',
+                    '--numeric-owner',
                 ),
                 { buffer: { stdout: false } },
             );
@@ -203,19 +208,23 @@ export default class Restore {
                 const [root, dir] = parts;
 
                 // GNU tar skips `..` members & fails, after the install is gone.
-                // only folders, files & symlinks: hard links can fail across volume mounts,
-                // devices & fifos don't belong in a backup. ABR's archives have neither.
-                if (!['d', '-', 'l'].includes(type) || parts.includes('..')) {
+                // no hard links, they can fail across volume mounts, nor devices. ABR's archives have neither.
+                if (
+                    !['d', '-', 'l', 'p'].includes(type) ||
+                    parts.includes('..')
+                ) {
                     unexpected.add(name || line);
                 } else if (root !== 'backup') {
-                    unexpected.add(root);
+                    unexpected.add(name || line);
                 } else if (parts.length <= 2 && type !== 'd') {
                     // `backup`, a volume & `appwrite` can only be folders.
                     unexpected.add(name);
                 } else if (!dir) {
                     continue;
                 } else if (dir === 'appwrite') {
-                    appwriteFiles.add(parts[2]);
+                    // bind-mounted to the host, ABR only writes the two files there.
+                    if (type === '-') appwriteFiles.add(parts[2]);
+                    else unexpected.add(name);
                 } else if (volumeName.test(dir)) {
                     volumes.add(dir);
                 } else {
@@ -235,7 +244,11 @@ export default class Restore {
         if (unexpected.size) {
             console.log(
                 chalk.red(
-                    `❌ The backup has unexpected entries: ${[...unexpected].slice(0, 5).join(', ')}.`,
+                    // quoted, names may hold control characters.
+                    `❌ The backup has unexpected entries: ${[...unexpected]
+                        .slice(0, 5)
+                        .map((name) => JSON.stringify(name))
+                        .join(', ')}.`,
                 ),
             );
             return null;
@@ -476,22 +489,21 @@ export default class Restore {
     }
 }
 
+const namedEscapes = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11 };
+
 /**
  * Decodes a name quoted by GNU tar's `--quoting-style=c`, with octal escapes for non-ASCII bytes.
  */
 function unquote(quoted) {
-    const named = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11 };
-    const bytes = [];
-    for (let i = 0; i < quoted.length; i++) {
-        if (quoted[i] !== '\\') {
-            bytes.push(...Buffer.from(quoted[i]));
-        } else if (/[0-7]{3}/.test(quoted.slice(i + 1, i + 4))) {
-            bytes.push(parseInt(quoted.slice(i + 1, i + 4), 8));
-            i += 3;
-        } else {
-            const escaped = quoted[++i];
-            bytes.push(named[escaped] ?? escaped.charCodeAt(0));
-        }
-    }
-    return Buffer.from(bytes).toString('utf8');
+    if (!quoted.includes('\\')) return quoted;
+
+    // escapes become latin1 chars, i.e. single bytes, decoded as utf8 after.
+    const bytes = quoted.replace(/\\(?:([0-7]{3})|(.))/g, (_, octal, char) =>
+        String.fromCharCode(
+            octal
+                ? parseInt(octal, 8)
+                : (namedEscapes[char] ?? char.charCodeAt(0)),
+        ),
+    );
+    return Buffer.from(bytes, 'latin1').toString('utf8');
 }

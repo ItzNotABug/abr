@@ -102,8 +102,8 @@ export function printVolumeSizes({ sizes }, volumes) {
 /**
  * Whether there's room for the backup, prints the reason if not.
  *
- * Only the snapshot is required to fit: it's taken next to the live database.
- * The archive's size is estimated without compression, so the user may go ahead anyway.
+ * Required: the snapshot & its compressed copy, at most its size, on Docker's disk next to the live database.
+ * The whole archive is estimated without compression, so the user may go ahead anyway.
  *
  * @param measure from {@link measureVolumes}.
  * @param mariadbVolume MariaDB's volume.
@@ -118,7 +118,15 @@ export function checkDiskSpace(measure, mariadbVolume, snapshotted) {
     const total =
         [...measure.sizes.values()].reduce((a, b) => a + b, 0) - skipped;
 
-    if (snapshot && !fits([[measure.scratch, snapshot]])) return 'snapshot';
+    if (
+        snapshot &&
+        !fits([
+            [measure.scratch, snapshot],
+            [measure.tmp, snapshot],
+        ])
+    ) {
+        return 'snapshot';
+    }
 
     // offen builds the archive in its `/tmp`, then copies it to `backups/`.
     return fits([

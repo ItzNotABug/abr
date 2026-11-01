@@ -23,10 +23,13 @@ export function acquireLock() {
         const content = readLock(file);
         if (content === null && create(file)) return hold(file);
 
-        // empty while another run is still writing it.
+        // empty while another run is still writing it, unless that was long ago.
         // this run's own pid is a killed run's lock, pids restart from 1 in containers.
         const pid = Number(content);
-        if (!pid || (pid !== process.pid && isRunning(pid))) {
+        const held = pid
+            ? pid !== process.pid && isRunning(pid)
+            : !isStale(file);
+        if (held) {
             console.error(
                 chalk.red(
                     `❌ Another ABR run (pid ${pid || 'unknown'}) is in progress. If not, remove "${file}".`,
@@ -36,6 +39,7 @@ export function acquireLock() {
         }
 
         // a killed run's lock. replaced by one run at a time, so a fresh lock is never removed.
+        if (isStale(breaker)) fs.rmSync(breaker, { force: true });
         if (create(breaker)) {
             try {
                 if (Number(readLock(file)) === pid) fs.rmSync(file);
@@ -92,6 +96,17 @@ function readLock(file) {
         return fs.readFileSync(file, 'utf8').trim();
     } catch (error) {
         return error.code === 'ENOENT' ? null : '';
+    }
+}
+
+/**
+ * Whether the file was last written over 10s ago, longer than any run takes to write its pid.
+ */
+function isStale(file) {
+    try {
+        return Date.now() - fs.statSync(file).mtimeMs > 10_000;
+    } catch {
+        return false;
     }
 }
 

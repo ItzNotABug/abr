@@ -9,7 +9,7 @@ import {
 } from './misc.js';
 
 /**
- * Returns the MariaDB container's `status`, `startedAt`, `image` id & `env`, or `null` if it doesn't exist.
+ * Returns the MariaDB container's `status`, `image` id & `env`, or `null` if it doesn't exist.
  *
  * Throws on any other failure, callers must not mistake it for a stopped database.
  */
@@ -27,7 +27,6 @@ export async function inspectMariaDB(container) {
         const [{ State, Image, Config }] = JSON.parse(stdout);
         return {
             status: State.Status,
-            startedAt: State.StartedAt,
             image: Image,
             env: Config.Env ?? [],
         };

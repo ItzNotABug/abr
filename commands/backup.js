@@ -220,7 +220,10 @@ export default class Backup {
             process.exitCode = 1;
             return;
         }
-        if (space === 'archive' && !(await this.#confirmLowSpace())) {
+        if (
+            space === 'archive' &&
+            !(await this.#confirmLowSpace(this.#backupType !== 'cold-backup'))
+        ) {
             process.exitCode = 1;
             return;
         }
@@ -238,7 +241,7 @@ export default class Backup {
 
         // on interrupt, abort & let `finally` clean up & bring Appwrite back. a second one exits right away.
         // `on`, not `once`: execa's exit hook re-raises the signal if no other listener is left.
-        const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+        const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
         const onInterrupt = (name) => {
             loader.stop();
             if (interrupted) {
@@ -293,6 +296,7 @@ export default class Backup {
                     return;
                 }
             }
+            if (signal.aborted) return;
 
             archived = await this.#archiveVolumes({
                 volumes,
@@ -331,10 +335,14 @@ export default class Backup {
 
     /**
      * Asks whether to go ahead when the archive may not fit, `false` if declined or not interactive.
+     *
+     * @param live whether Appwrite keeps or resumes running on that disk.
      */
-    static async #confirmLowSpace() {
-        const message =
-            'The size is estimated without compression, the archive may still fit.';
+    static async #confirmLowSpace(live) {
+        const risk = live
+            ? ' If the disk fills up, Appwrite may fail writes until space is freed.'
+            : '';
+        const message = `The size is estimated without compression, the archive may still fit.${risk}`;
         if (!process.stdin.isTTY) {
             console.log(chalk.red(`❌ Not enough disk space. ${message}`));
             return false;
@@ -479,18 +487,11 @@ export default class Backup {
         }
 
         // a complete archive, but the interrupt asked for no backup.
-        if (signal.aborted) {
-            await removePath(partial);
-            return false;
-        }
-
-        if (verify && !(await this.#verifyArchive(verify))) {
+        const verified =
+            !signal.aborted && (!verify || (await this.#verifyArchive(verify)));
+        if (!verified || signal.aborted) {
             await removePath(partial);
             if (!signal.aborted) process.exitCode = 1;
-            return false;
-        }
-        if (signal.aborted) {
-            await removePath(partial);
             return false;
         }
 

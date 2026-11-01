@@ -10,7 +10,6 @@ import {
     checkDocker,
     docker,
     helperArgs,
-    helperImage,
     restartAppwriteStack,
     signalExitCode,
 } from '../utils/misc.js';
@@ -33,6 +32,7 @@ const extractorImage = 'debian:stable-slim';
 export default class Restore {
     // set once the install is being changed, an interrupt then leaves it incomplete.
     static #changing = false;
+    static #restarting = false;
     /**
      * The restore command for `yargs` to manage.
      */
@@ -65,6 +65,12 @@ export default class Restore {
                             '⚠️  Restore interrupted, the install is incomplete. Run "abr restore" again.',
                         ),
                     );
+                } else if (this.#restarting) {
+                    console.log(
+                        chalk.yellow(
+                            `⚠️  Restore complete, but Appwrite may be partly started. Run "docker compose up -d" in ${appwriteDir()}.`,
+                        ),
+                    );
                 }
                 process.exit(signalExitCode(name));
             });
@@ -92,6 +98,7 @@ export default class Restore {
             return;
         }
         this.#changing = false;
+        this.#restarting = true;
 
         await restartAppwriteStack(loader);
     }
@@ -191,7 +198,13 @@ export default class Restore {
             for await (const line of listing) {
                 const [, type, rest = ''] = line.match(entry) ?? [];
                 // links list their target after the name.
-                const name = rest.split(type === 'h' ? ' link to ' : ' -> ')[0];
+                const [name, target] = rest.split(
+                    type === 'h' ? ' link to ' : ' -> ',
+                );
+                // hard links point to members, which must be extracted too.
+                const outside =
+                    type === 'h' &&
+                    !/^\/*backup\/(?!.*(^|\/)\.\.(\/|$))/.test(target ?? '');
                 const parts = name
                     .replace(/^\/+/, '')
                     .replace(/\/$/, '')
@@ -199,7 +212,7 @@ export default class Restore {
                 const [root, dir] = parts;
 
                 // GNU tar skips `..` members & fails, after the install is gone.
-                if (!type || parts.includes('..')) {
+                if (!type || parts.includes('..') || outside) {
                     unexpected.add(name || line);
                 } else if (root !== 'backup') {
                     unexpected.add(root);
@@ -257,7 +270,7 @@ export default class Restore {
     static async #pullImages() {
         loader.start(chalk.blue('Preparing the restore...'));
         try {
-            for (const image of [extractorImage, helperImage]) {
+            for (const image of [extractorImage]) {
                 const { failed } = await docker(['image', 'inspect', image], {
                     reject: false,
                 });
@@ -352,7 +365,7 @@ export default class Restore {
                 await docker(['volume', 'rm', '-f', ...volumeNames]);
             }
             // e.g. root-owned, as created by Appwrite's installer.
-            if (!(await removePath(appwriteDir()))) {
+            if (!(await removePath(appwriteDir(), extractorImage))) {
                 throw new Error(`could not remove ${appwriteDir()}.`);
             }
         } catch (error) {

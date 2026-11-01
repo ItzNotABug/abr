@@ -66,7 +66,7 @@ export async function movePath(from, to) {
     } catch (error) {
         if (!['EACCES', 'EPERM'].includes(error.code)) throw error;
         await docker(
-            rootCommand(from, 'mv', path.basename(from), path.basename(to)),
+            rootCommand(from, ['mv', path.basename(from), path.basename(to)]),
         );
     }
 }
@@ -74,15 +74,16 @@ export async function movePath(from, to) {
 /**
  * Removes a file or folder, if any. Falls back to root like {@link movePath}.
  *
+ * @param image for the root fallback, e.g. one already pulled.
  * @returns {Promise<boolean>} `false` if it could not be removed.
  */
-export async function removePath(target) {
+export async function removePath(target, image) {
     try {
         fs.rmSync(target, { recursive: true, force: true });
         return true;
     } catch {
         const { failed } = await docker(
-            rootCommand(target, 'rm', '-rf', path.basename(target)),
+            rootCommand(target, ['rm', '-rf', path.basename(target)], image),
             { reject: false },
         );
         return !failed;
@@ -96,21 +97,22 @@ export function removePathSync(target) {
     try {
         fs.rmSync(target, { recursive: true, force: true });
     } catch {
-        dockerSync(rootCommand(target, 'rm', '-rf', path.basename(target)), {
+        dockerSync(rootCommand(target, ['rm', '-rf', path.basename(target)]), {
             reject: false,
         });
     }
 }
 
 /**
- * `docker run` arguments to run `command` as root in the target's directory.
+ * `docker run` arguments to run a command as root in the target's directory.
  */
-function rootCommand(target, command, ...args) {
+function rootCommand(target, [command, ...args], image) {
     return helperArgs(
         {
             entrypoint: command,
             mounts: [`${path.dirname(target)}:/target`],
             workdir: '/target',
+            ...(image && { image }),
         },
         ...args,
     );

@@ -1,19 +1,38 @@
 import * as fs from 'fs';
 import chalk from 'chalk';
-import { execa } from 'execa';
 import * as path from 'path';
 import Table from 'cli-table3';
 import inquirer from 'inquirer';
 import loading from 'loading-cli';
 import {
+    appwriteDir,
     appwriteVolumes,
     checkDocker,
+    docker,
+    helperArgs,
+    helperImage,
     restartAppwriteStack,
+    signalExitCode,
 } from '../utils/misc.js';
+import {
+    backupFilePattern,
+    backupsDir,
+    removePath,
+} from '../utils/archives.js';
+import { readCompose } from '../utils/compose.js';
+import { acquireLock } from '../utils/lock.js';
+import { existingVolumes } from '../utils/volumes.js';
 
 const loader = loading('');
 
+/**
+ * Extracts archives. GNU tar, busybox's ignores the PAX headers of files over 8 GB.
+ */
+const extractorImage = 'debian:stable-slim';
+
 export default class Restore {
+    // set once the install is being changed, an interrupt then leaves it incomplete.
+    static #changing = false;
     /**
      * The restore command for `yargs` to manage.
      */
@@ -31,231 +50,63 @@ export default class Restore {
      * Starts task once yargs receives the command.
      */
     static async #performTask() {
-        if (!(await checkDocker(loader))) return;
-
-        if (await this.#checkIfAppwriteRemnantExists()) {
-            const backupFilePath = await this.#listBackupFiles();
-            await this.#copyBackupFile(backupFilePath);
-            await this.#performRestore();
-            await restartAppwriteStack(loader);
-        }
-    }
-
-    /**
-     * Checks if there are previous appwrite images, volumes and container.
-     */
-    static async #checkIfAppwriteRemnantExists() {
-        const remnantsExist = await this.#detectAppwriteRemnants();
-
-        if (!remnantsExist) {
-            console.log(chalk.green('✅ No Appwrite remnants detected.'));
-            return true;
+        if (!(await checkDocker(loader)) || !acquireLock()) {
+            process.exitCode = 1;
+            return;
         }
 
-        console.log('\n');
-
-        const { shouldDelete } = await inquirer.prompt([
-            {
-                type: 'confirm',
-                name: 'shouldDelete',
-                message:
-                    'Appwrite remnants detected. Do you want to remove them for a clean installation?',
-                default: true,
-            },
-        ]);
-
-        if (shouldDelete) {
-            await this.#deleteAppwriteRemnants();
-            console.log(chalk.green('✅ Appwrite remnants removed.'));
-        } else {
-            console.log(
-                chalk.yellow('⚠️  Restoration requires a clean install.'),
-            );
-            process.exit(1);
-        }
-
-        return true;
-    }
-
-    /**
-     * Checks if there are previous appwrite images, volumes and container.
-     */
-    static async #detectAppwriteRemnants() {
-        // Initialize an empty array to store remnants information
-        const remnants = [];
-
-        try {
-            // Check for Appwrite-related containers
-            const { stdout: containers } = await execa('docker', [
-                'ps',
-                '-a',
-                '--filter',
-                'name=appwrite',
-                '--format',
-                '{{.Names}}',
-            ]);
-            if (containers) {
-                containers.split('\n').forEach((container) => {
-                    if (container)
-                        remnants.push({ name: container, type: 'Container' });
-                });
-            }
-
-            // Check for Appwrite-related volumes
-            const { stdout: volumes } = await execa('docker', [
-                'volume',
-                'ls',
-                '--filter',
-                'name=appwrite',
-                '--format',
-                '{{.Name}}',
-            ]);
-            if (volumes) {
-                volumes.split('\n').forEach((volume) => {
-                    if (volume) remnants.push({ name: volume, type: 'Volume' });
-                });
-            }
-
-            const appwritePath = path.join(process.cwd(), 'appwrite');
-            if (fs.existsSync(appwritePath)) {
-                remnants.push({ name: appwritePath, type: 'Folder' });
-            }
-
-            // If no remnants were found, return false
-            if (remnants.length === 0) {
-                return false;
-            }
-
-            // Display remnants in a table
-            const table = new Table({
-                head: [chalk.blue('Name'), chalk.blue('Type')],
-                colWidths: [50, 15],
+        // exits via `process.exit` to release the lock, attached docker commands get the same Ctrl+C.
+        for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+            process.on(name, () => {
+                loader.stop();
+                if (this.#changing) {
+                    console.log(
+                        chalk.yellow(
+                            '⚠️  Restore interrupted, the install is incomplete. Run "abr restore" again.',
+                        ),
+                    );
+                }
+                process.exit(signalExitCode(name));
             });
-
-            remnants.forEach((remnant) =>
-                table.push([
-                    chalk.yellow(remnant.name),
-                    chalk.green(remnant.type),
-                ]),
-            );
-
-            console.log(chalk.blue('\nDetected Appwrite Remnants:\n'));
-            console.log(table.toString());
-
-            return true;
-        } catch (error) {
-            console.error(
-                chalk.red('Error checking for Appwrite remnants:'),
-                error.message,
-            );
-            return false;
         }
-    }
 
-    /**
-     * Deletes the appwrite remnants if found.
-     */
-    static async #deleteAppwriteRemnants() {
-        try {
-            // Remove Appwrite-related containers
-            const { stdout: containerIds } = await execa('docker', [
-                'ps',
-                '-a',
-                '--filter',
-                'label=com.docker.compose.project=appwrite',
-                '--format',
-                '{{.ID}}',
-            ]);
-            if (containerIds) {
-                const containerList = containerIds
-                    .split('\n')
-                    .filter((id) => id);
-                await execa('docker', [
-                    'rm',
-                    '-f',
-                    ...containerList.map(String),
-                ]);
-                console.log(chalk.green('✅ Appwrite containers removed.'));
-            } else {
+        // the archive is checked before anything is removed.
+        const file = await this.#selectBackup();
+        const volumes =
+            file &&
+            (await this.#pullImages()) &&
+            (await this.#readArchive(file));
+        if (
+            !volumes ||
+            !(await this.#removeRemnants(volumes)) ||
+            !(await this.#extractArchive(file, volumes))
+        ) {
+            if (this.#changing) {
                 console.log(
-                    chalk.yellow('✅ No Appwrite containers found to remove.'),
+                    chalk.yellow(
+                        '⚠️  The install is incomplete. Fix the error above & run "abr restore" again.',
+                    ),
                 );
             }
-
-            // Remove Appwrite-related volumes
-            const { stdout: volumeNames } = await execa('docker', [
-                'volume',
-                'ls',
-                '--filter',
-                'name=appwrite',
-                '--format',
-                '{{.Name}}',
-            ]);
-            if (volumeNames) {
-                const volumeList = volumeNames
-                    .split('\n')
-                    .filter((name) => name);
-                await execa('docker', [
-                    'volume',
-                    'rm',
-                    '-f',
-                    ...volumeList.map(String),
-                ]);
-                console.log(chalk.green('✅ Appwrite volumes removed.'));
-            } else {
-                console.log(
-                    chalk.yellow('✅ No Appwrite volumes found to remove.'),
-                );
-            }
-
-            // Remove Appwrite-related images
-            const { stdout: imageIds } = await execa('docker', [
-                'images',
-                '--filter',
-                'reference=appwrite/*',
-                '--format',
-                '{{.ID}}',
-            ]);
-            if (imageIds) {
-                const imageList = imageIds.split('\n').filter((id) => id);
-                await execa('docker', ['rmi', '-f', ...imageList.map(String)]);
-                console.log(chalk.green('✅ Appwrite images removed.'));
-            } else {
-                console.log(
-                    chalk.yellow('✅ No Appwrite images found to remove.'),
-                );
-            }
-
-            // Remove Appwrite folder
-            const appwritePath = path.join(process.cwd(), 'appwrite');
-            if (fs.existsSync(appwritePath)) {
-                fs.rmSync(appwritePath, { recursive: true, force: true });
-                console.log(chalk.green('✅ Appwrite folder removed.'));
-            } else {
-                console.log(
-                    chalk.yellow('✅ No Appwrite folder found to remove.'),
-                );
-            }
-        } catch (error) {
-            console.error(
-                chalk.red('Error removing Appwrite remnants:'),
-                error.message,
-            );
+            process.exitCode = 1;
+            return;
         }
+        this.#changing = false;
+
+        await restartAppwriteStack(loader);
     }
 
     /**
      * Select a backup from a list of available backups, if any.
      */
-    static async #listBackupFiles() {
-        const backupPath = path.join(process.cwd(), 'backups');
-        if (!fs.existsSync(backupPath)) {
+    static async #selectBackup() {
+        if (!fs.existsSync(backupsDir())) {
             console.log(chalk.red('❌ No backups directory found.'));
             return null;
         }
 
         const files = fs
-            .readdirSync(backupPath)
+            .readdirSync(backupsDir())
             .filter(
                 (file) =>
                     file.startsWith('backup-') && file.endsWith('.tar.gz'),
@@ -267,12 +118,7 @@ export default class Restore {
         }
 
         const backups = files.map((file) => {
-            const baseName = file.replace('.tar.gz', '');
-
-            const dateMatch = baseName.match(
-                /backup-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/,
-            );
-
+            const dateMatch = file.match(backupFilePattern);
             if (!dateMatch) {
                 return { name: file, displayDate: 'Unknown' };
             }
@@ -310,109 +156,317 @@ export default class Restore {
             selectedBackup = response.selectedBackup;
         }
 
-        return path.join(backupPath, selectedBackup[0]);
+        return path.join(backupsDir(), selectedBackup[0]);
     }
 
     /**
-     * Copies the backup file to cwd for restoration.
+     * Reads the whole archive, which also checks its compression.
+     *
+     * @returns {Promise<string[]|null>} the volumes in it, `null` with the reason printed if it's unusable.
      */
-    static async #copyBackupFile(backupFilePath) {
-        if (!backupFilePath) {
-            console.log(chalk.red('❌ No backup file selected.'));
-            return;
-        }
+    static async #readArchive(file) {
+        loader.start(chalk.blue('Checking the backup...'));
 
-        const destinationPath = path.join(process.cwd(), 'backup.tar.gz');
-        fs.copyFileSync(backupFilePath, destinationPath);
-        console.log(
-            chalk.green(
-                '✅ Backup file copied to the current directory for restoration.',
-            ),
-        );
-    }
-
-    /**
-     * Performs a complete restore.
-     */
-    static async #performRestore() {
-        const tmpDir = '/tmp/backup';
-        const appwriteDir = path.join(process.cwd(), 'appwrite');
-        const backupFilePath = path.join(process.cwd(), 'backup.tar.gz');
-
-        if (!fs.existsSync(backupFilePath)) {
-            console.log(
-                chalk.red(
-                    '❌ Backup file "backup.tar.gz" not found in the current directory.',
-                ),
-            );
-            return;
-        }
-
-        // Step 2: Extract the backup file
-        loader.start(chalk.blue('Extracting backup...'));
-        fs.mkdirSync(tmpDir, { recursive: true });
-        await execa('tar', ['-C', '/tmp', '-xvf', backupFilePath]);
-
-        loader.stop();
-
-        // Step 3: Run a temporary container with mounted volumes for data restoration
-        loader.start(
-            chalk.blue('Setting up temporary container for restoration...'),
-        );
+        const volumes = new Set();
+        const appwriteFiles = new Set();
+        const unexpected = new Set();
+        // names become `docker run -v` sources, anything else could be a host path.
+        const volumeName = /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/;
+        // GNU tar's verbose listing: type & mode, owner, size, date, time, name.
+        const entry = /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s(.*)$/;
         try {
-            await execa('docker', [
-                'run',
-                '-d',
-                '--name',
-                'temp_restore_container',
-                ...this.#getVolumeMappings(),
-                '-v',
-                `${appwriteDir}:/backup_restore/appwrite`,
-                'alpine',
-                'tail',
-                '-f',
-                '/dev/null',
-            ]);
+            // with the extractor's tar, which reads it the same way. streamed, archives can hold millions of files.
+            const listing = docker(
+                helperArgs(
+                    {
+                        entrypoint: 'tar',
+                        image: extractorImage,
+                        mounts: [`${path.dirname(file)}:/archive:ro`],
+                    },
+                    '-tvzPf',
+                    `/archive/${path.basename(file)}`,
+                ),
+                { buffer: { stdout: false } },
+            );
+            for await (const line of listing) {
+                const [, type, rest = ''] = line.match(entry) ?? [];
+                // links list their target after the name.
+                const name = rest.split(type === 'h' ? ' link to ' : ' -> ')[0];
+                const parts = name
+                    .replace(/^\/+/, '')
+                    .replace(/\/$/, '')
+                    .split('/');
+                const [root, dir] = parts;
 
-            loader.stop();
-
-            // Step 4: Copy data from extracted backup into the container’s volumes
-            loader.start(chalk.blue('Copying backup data into volumes...'));
-            await execa('docker', [
-                'cp',
-                `${tmpDir}/.`,
-                'temp_restore_container:/backup_restore',
-            ]);
+                // GNU tar skips `..` members & fails, after the install is gone.
+                if (!type || parts.includes('..')) {
+                    unexpected.add(name || line);
+                } else if (root !== 'backup') {
+                    unexpected.add(root);
+                } else if (!dir) {
+                    continue;
+                } else if (parts.length === 2 && type !== 'd') {
+                    // a volume or `appwrite` can only be a folder.
+                    unexpected.add(name);
+                } else if (dir === 'appwrite') {
+                    appwriteFiles.add(parts[2]);
+                } else if (volumeName.test(dir)) {
+                    volumes.add(dir);
+                } else {
+                    unexpected.add(`backup/${dir}`);
+                }
+            }
             loader.stop();
         } catch (error) {
-            console.error(
-                chalk.red('❌ Error during data restoration:'),
-                error.message,
+            loader.stop();
+            console.log(
+                chalk.red('❌ The backup is unreadable or incomplete:'),
+                error.stderr?.trim() || error.message,
             );
-            return;
-        } finally {
-            // delete the backup irrespective of the state.
-            fs.rmSync(backupFilePath, { force: true });
+            return null;
         }
 
-        // Step 5: Clean up temporary container and files
-        loader.start(chalk.blue('Cleaning up temporary resources...'));
-        await execa('docker', ['stop', 'temp_restore_container']);
-        await execa('docker', ['rm', 'temp_restore_container']);
-        fs.rmSync(tmpDir, { recursive: true, force: true });
+        if (unexpected.size) {
+            console.log(
+                chalk.red(
+                    `❌ The backup has unexpected entries: ${[...unexpected].slice(0, 5).join(', ')}.`,
+                ),
+            );
+            return null;
+        }
 
-        loader.stop();
+        const missing = ['.env', 'docker-compose.yml'].filter(
+            (name) => !appwriteFiles.has(name),
+        );
+        if (missing.length || volumes.size === 0) {
+            console.log(
+                chalk.red(
+                    `❌ The backup is missing ${missing.length ? missing.join(' & ') : 'the volumes'}.`,
+                ),
+            );
+            return null;
+        }
 
-        console.log(chalk.green('✅ Restoration completed successfully.'));
+        console.log(chalk.green('✅ Backup checked.'));
+        return [...volumes];
     }
 
     /**
-     * Returns the volume mappings for restore.
+     * Pulls the images restoring needs, before anything is removed.
      */
-    static #getVolumeMappings() {
-        return appwriteVolumes.flatMap((volume) => [
-            '-v',
-            `${volume}:/backup_restore/${volume}`,
+    static async #pullImages() {
+        loader.start(chalk.blue('Preparing the restore...'));
+        try {
+            for (const image of [extractorImage, helperImage]) {
+                const { failed } = await docker(['image', 'inspect', image], {
+                    reject: false,
+                });
+                if (failed) await docker(['pull', image]);
+            }
+            loader.stop();
+            return true;
+        } catch (error) {
+            loader.stop();
+            console.log(
+                chalk.red('❌ Could not pull the images to restore with:'),
+                error.stderr?.trim() || error.message,
+            );
+            return false;
+        }
+    }
+
+    /**
+     * Removes the install's containers & volumes, the volumes the backup restores & the `appwrite` folder, once confirmed.
+     *
+     * @returns {Promise<boolean>} `false` if declined or failed.
+     */
+    static async #removeRemnants(volumes) {
+        let remnants;
+        try {
+            remnants = await this.#findRemnants(volumes);
+        } catch (error) {
+            console.error(
+                chalk.red('❌ Error checking for Appwrite remnants:'),
+                error.stderr?.trim() || error.message,
+            );
+            return false;
+        }
+
+        if (remnants.length === 0) {
+            console.log(chalk.green('✅ No Appwrite remnants detected.'));
+            return true;
+        }
+
+        const table = new Table({
+            head: [chalk.blue('Name'), chalk.blue('Type')],
+            colWidths: [50, 25],
+        });
+        remnants.forEach(({ name, type }) =>
+            table.push([
+                chalk.yellow(name),
+                type === 'Volume' && !volumes.includes(name)
+                    ? chalk.red('Volume, not in backup')
+                    : chalk.green(type),
+            ]),
+        );
+        console.log(chalk.blue('\nDetected Appwrite Remnants:\n'));
+        console.log(table.toString());
+        console.log('\n');
+
+        const users = remnants.flatMap((remnant) => remnant.users ?? []);
+        if (users.length) {
+            console.log(
+                chalk.red(
+                    `❌ Containers outside the install use its volumes, remove them first: ${[...new Set(users)].join(', ')}.`,
+                ),
+            );
+            return false;
+        }
+
+        const { shouldDelete } = await inquirer.prompt([
+            {
+                type: 'confirm',
+                name: 'shouldDelete',
+                message:
+                    'Appwrite remnants detected. Do you want to remove them for a clean installation?',
+                default: true,
+            },
         ]);
+        if (!shouldDelete) {
+            console.log(
+                chalk.yellow('⚠️  Restoration requires a clean install.'),
+            );
+            return false;
+        }
+
+        const names = (type) =>
+            remnants.filter((r) => r.type === type).map((r) => r.name);
+        this.#changing = true;
+        try {
+            const containers = names('Container');
+            if (containers.length) {
+                await docker(['rm', '-f', ...containers]);
+            }
+            const volumeNames = names('Volume');
+            if (volumeNames.length) {
+                await docker(['volume', 'rm', '-f', ...volumeNames]);
+            }
+            // e.g. root-owned, as created by Appwrite's installer.
+            if (!(await removePath(appwriteDir()))) {
+                throw new Error(`could not remove ${appwriteDir()}.`);
+            }
+        } catch (error) {
+            console.error(
+                chalk.red('❌ Error removing Appwrite remnants:'),
+                error.stderr?.trim() || error.message,
+            );
+            return false;
+        }
+
+        console.log(chalk.green('✅ Appwrite remnants removed.'));
+        return true;
+    }
+
+    /**
+     * The install's containers & volumes by its compose project, plus the volumes the backup restores.
+     * Volumes list the `users` outside the install that would block their removal.
+     */
+    static async #findRemnants(volumes) {
+        const project = fs.existsSync(appwriteDir())
+            ? ((await readCompose().catch(() => null))?.project ?? 'appwrite')
+            : 'appwrite';
+        const filter = `label=com.docker.compose.project=${project}`;
+
+        const list = async (args) =>
+            (await docker(args)).stdout.split('\n').filter(Boolean);
+        // volumes created by restores have no compose labels, so also by name.
+        const [containers, projectVolumes, namedVolumes] = await Promise.all([
+            list(['ps', '-a', '--filter', filter, '--format', '{{.Names}}']),
+            list(['volume', 'ls', '--filter', filter, '--format', '{{.Name}}']),
+            existingVolumes([...new Set([...appwriteVolumes, ...volumes])]),
+        ]);
+
+        const volumeNames = [...new Set([...projectVolumes, ...namedVolumes])];
+        const users = await Promise.all(
+            volumeNames.map(async (volume) =>
+                (
+                    await list([
+                        'ps',
+                        '-a',
+                        '--filter',
+                        `volume=${volume}`,
+                        '--format',
+                        '{{.Names}}',
+                    ])
+                ).filter((name) => !containers.includes(name)),
+            ),
+        );
+
+        return [
+            ...containers.map((name) => ({ name, type: 'Container' })),
+            ...volumeNames.map((name, i) => ({
+                name,
+                type: 'Volume',
+                users: users[i],
+            })),
+            ...(fs.existsSync(appwriteDir())
+                ? [{ name: appwriteDir(), type: 'Folder' }]
+                : []),
+        ];
+    }
+
+    /**
+     * Extracts the archive straight into the volumes & the `appwrite` folder, as root to keep file owners.
+     */
+    static async #extractArchive(file, volumes) {
+        this.#changing = true;
+        loader.start(chalk.blue('Restoring volumes...'));
+
+        // the `appwrite` folder is handed to the user running ABR, files in volumes keep their owners.
+        // not with rootless docker or userns-remap, where container uids map to other host uids.
+        const { stdout: security } = await docker(
+            ['info', '--format', '{{json .SecurityOptions}}'],
+            { reject: false },
+        );
+        const remapped = /rootless|userns/.test(security ?? '');
+        const owner =
+            process.getuid && !remapped
+                ? `${process.getuid()}:${process.getgid()}`
+                : '';
+        try {
+            // docker creates the missing `appwrite` folder, as root.
+            await docker(
+                helperArgs(
+                    {
+                        entrypoint: 'sh',
+                        image: extractorImage,
+                        mounts: [
+                            ...volumes.map(
+                                (volume) =>
+                                    `${volume}:/restore/backup/${volume}`,
+                            ),
+                            `${appwriteDir()}:/restore/backup/appwrite`,
+                            `${path.dirname(file)}:/archive:ro`,
+                        ],
+                    },
+                    '-c',
+                    'tar -xzf "/archive/$1" -C /restore --numeric-owner && if [ -n "$2" ]; then chown -R "$2" /restore/backup/appwrite; fi',
+                    'sh',
+                    path.basename(file),
+                    owner,
+                ),
+            );
+            loader.stop();
+        } catch (error) {
+            loader.stop();
+            console.error(
+                chalk.red('❌ Error during data restoration:'),
+                error.stderr?.trim() || error.message,
+            );
+            return false;
+        }
+
+        console.log(chalk.green('✅ Restoration completed successfully.'));
+        return true;
     }
 }

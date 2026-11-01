@@ -1,5 +1,6 @@
 import chalk from 'chalk';
-import { execa } from 'execa';
+import { execa, execaSync } from 'execa';
+import * as os from 'os';
 import * as path from 'path';
 
 // Pink - The Brand Color
@@ -22,11 +23,6 @@ ${chalk.blue('_'.repeat(146))}
 `;
 
 /**
- * Appwrite's MariaDB docker volume.
- */
-export const mariadbVolume = 'appwrite_appwrite-mariadb';
-
-/**
  * Appwrite docker volumes.
  */
 export const appwriteVolumes = [
@@ -35,11 +31,102 @@ export const appwriteVolumes = [
     'appwrite_appwrite-builds',
     'appwrite_appwrite-config',
     'appwrite_appwrite-executor',
-    mariadbVolume,
+    'appwrite_appwrite-mariadb',
     'appwrite_appwrite-uploads',
     'appwrite_appwrite-functions',
     'appwrite_appwrite-certificates',
 ];
+
+/**
+ * Marks containers & volumes created by ABR, to find leftovers of killed runs.
+ * Valued `backup` on the snapshot & archive containers, which hold locks & write.
+ */
+export const abrLabel = 'com.itznotabug.abr';
+
+/**
+ * Image of ABR's helper containers, always pulled for backups as it creates the archives.
+ */
+export const helperImage = 'offen/docker-volume-backup:latest';
+
+/**
+ * `docker run` arguments for an ABR helper container, removed on exit. `--init` makes signals stop it.
+ *
+ * @param options.role the {@link abrLabel} value.
+ * @param options.extra more `docker run` flags.
+ */
+export function helperArgs(
+    {
+        entrypoint,
+        mounts = [],
+        env = [],
+        name,
+        workdir,
+        role = 'helper',
+        extra = [],
+        image = helperImage,
+    },
+    ...args
+) {
+    return [
+        'run',
+        '--rm',
+        '--init',
+        '--label',
+        `${abrLabel}=${role}`,
+        ...(name ? ['--name', name] : []),
+        ...extra,
+        ...mounts.flatMap((mount) => ['-v', mount]),
+        ...env.flatMap((variable) => ['--env', variable]),
+        ...(workdir ? ['-w', workdir] : []),
+        '--entrypoint',
+        entrypoint,
+        image,
+        ...args,
+    ];
+}
+
+/**
+ * The Appwrite install's directory, `appwrite/` in the current directory.
+ */
+export function appwriteDir() {
+    return path.join(process.cwd(), 'appwrite');
+}
+
+let detached = false;
+
+/**
+ * While ABR handles interrupts itself, docker commands run in their own process group,
+ * so a Ctrl+C reaches only ABR, which then stops or finishes them. Otherwise it stops them too.
+ */
+export function setHandlingInterrupts(handling) {
+    detached = handling;
+}
+
+export function docker(args, options = {}) {
+    return execa('docker', args, { detached, ...options });
+}
+
+/**
+ * {@link docker} for a forced exit, in ABR's process group as `execaSync` can't detach.
+ */
+export function dockerSync(args, options = {}) {
+    return execaSync('docker', args, options);
+}
+
+export function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function sleepSync(ms) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * The shell's exit code for a process ended by `signal`, e.g. 130 for `SIGINT`.
+ */
+export function signalExitCode(signal) {
+    return 128 + os.constants.signals[signal];
+}
 
 /**
  * Backup types.
@@ -93,13 +180,15 @@ export async function checkDocker(loader) {
  * Restarts the appwrite stack.
  *
  * This will take a while because this also fetches all the pruned images from docker hub.
+ *
+ * @param onStart gets the running `docker compose` command.
  */
-export async function restartAppwriteStack(loader) {
+export async function restartAppwriteStack(loader, onStart = () => {}) {
     loader.start(chalk.blue('Restarting appwrite (This can take a while...)'));
     try {
-        await execa('docker', ['compose', 'up', '-d'], {
-            cwd: path.join(process.cwd(), 'appwrite'),
-        });
+        const command = docker(['compose', 'up', '-d'], { cwd: appwriteDir() });
+        onStart(command);
+        await command;
 
         loader.stop();
         console.log(chalk.green('✅ Appwrite stack restarted.'));
@@ -115,13 +204,15 @@ export async function restartAppwriteStack(loader) {
 
 /**
  * Resumes the appwrite stack.
+ *
+ * @param onStart gets the running `docker compose` command.
  */
-export async function resumeAppwriteStack(loader) {
+export async function resumeAppwriteStack(loader, onStart = () => {}) {
     loader.start(chalk.blue('Resuming appwrite'));
     try {
-        await execa('docker', ['compose', 'unpause'], {
-            cwd: path.join(process.cwd(), 'appwrite'),
-        });
+        const command = docker(['compose', 'unpause'], { cwd: appwriteDir() });
+        onStart(command);
+        await command;
 
         loader.stop();
         console.log(chalk.green('✅ Appwrite stack resumed.'));

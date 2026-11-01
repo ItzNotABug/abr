@@ -93,16 +93,13 @@ export async function removePath(target, image) {
 /**
  * {@link removePath} for a forced exit.
  */
-export function removePathSync(target, image) {
+export function removePathSync(target) {
     try {
         fs.rmSync(target, { recursive: true, force: true });
     } catch {
-        dockerSync(
-            rootCommand(target, ['rm', '-rf', path.basename(target)], image),
-            {
-                reject: false,
-            },
-        );
+        dockerSync(rootCommand(target, ['rm', '-rf', path.basename(target)]), {
+            reject: false,
+        });
     }
 }
 

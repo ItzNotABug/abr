@@ -221,7 +221,7 @@ export default class Backup {
             return;
         }
         if (space === 'archive' && !(await this.#confirmLowSpace())) {
-            process.exitCode ||= 1;
+            process.exitCode = 1;
             return;
         }
 
@@ -342,22 +342,15 @@ export default class Backup {
             return false;
         }
 
-        try {
-            const { proceed } = await inquirer.prompt([
-                {
-                    type: 'confirm',
-                    name: 'proceed',
-                    message: `${message} Continue anyway?`,
-                    default: false,
-                },
-            ]);
-            return proceed;
-        } catch (error) {
-            // Ctrl+C at the prompt.
-            if (error.name !== 'ExitPromptError') throw error;
-            process.exitCode = signalExitCode('SIGINT');
-            return false;
-        }
+        const { proceed } = await inquirer.prompt([
+            {
+                type: 'confirm',
+                name: 'proceed',
+                message: `${message} Continue anyway?`,
+                default: false,
+            },
+        ]);
+        return proceed;
     }
 
     /**

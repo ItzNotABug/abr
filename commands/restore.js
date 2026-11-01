@@ -180,7 +180,6 @@ export default class Restore {
         const volumeName = /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/;
         // GNU tar's verbose listing: type & mode, owner, size, date, time, name.
         const entry = /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s(.*)$/;
-        const members = new Set();
         try {
             // with the extractor's tar, which reads it the same way. streamed, archives can hold millions of files.
             const listing = docker(
@@ -197,32 +196,25 @@ export default class Restore {
             );
             for await (const line of listing) {
                 const [, type, rest = ''] = line.match(entry) ?? [];
-                const [name, target] =
-                    type === 'h'
-                        ? hardLink(rest, members)
-                        : // symlinks list their target after the name.
-                          [rest.split(' -> ')[0]];
-                const parts = normalize(name ?? '').split('/');
+                // symlinks list their target after the name.
+                const name = type === 'l' ? rest.split(' -> ')[0] : rest;
+                const parts = name
+                    .replace(/^\/+/, '')
+                    .replace(/\/$/, '')
+                    .split('/');
                 const [root, dir] = parts;
-                members.add(parts.join('/'));
 
                 // GNU tar skips `..` members & fails, after the install is gone.
-                // hard links must point to an earlier member in the same mount.
-                if (
-                    !type ||
-                    parts.includes('..') ||
-                    (type === 'h' &&
-                        target?.split('/').slice(0, 2).join('/') !==
-                            parts.slice(0, 2).join('/'))
-                ) {
+                // hard links can fail across volume mounts, ABR's archives never have them.
+                if (!type || type === 'h' || parts.includes('..')) {
                     unexpected.add(name || line);
                 } else if (root !== 'backup') {
                     unexpected.add(root);
+                } else if (parts.length <= 2 && type !== 'd') {
+                    // `backup`, a volume & `appwrite` can only be folders.
+                    unexpected.add(name);
                 } else if (!dir) {
                     continue;
-                } else if (parts.length === 2 && type !== 'd') {
-                    // a volume or `appwrite` can only be a folder.
-                    unexpected.add(name);
                 } else if (dir === 'appwrite') {
                     appwriteFiles.add(parts[2]);
                 } else if (volumeName.test(dir)) {
@@ -483,27 +475,4 @@ export default class Restore {
         console.log(chalk.green('✅ Restoration completed successfully.'));
         return true;
     }
-}
-
-/**
- * A member's name without leading & trailing slashes.
- */
-function normalize(name) {
-    return name.replace(/^\/+/, '').replace(/\/$/, '');
-}
-
-/**
- * Splits a hard link's listing into its name & target, the target being an earlier member.
- * Either may contain ` link to `, so the split that names a member wins.
- *
- * @returns {[string, string|undefined]} the target is `undefined` if no earlier member matches.
- */
-function hardLink(rest, members) {
-    const separator = ' link to ';
-    for (let i = rest.indexOf(separator); i !== -1; ) {
-        const target = normalize(rest.slice(i + separator.length));
-        if (members.has(target)) return [rest.slice(0, i), target];
-        i = rest.indexOf(separator, i + 1);
-    }
-    return [rest.split(separator)[0], undefined];
 }

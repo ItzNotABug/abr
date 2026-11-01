@@ -31,13 +31,18 @@ export function acquireLock() {
             if (!pid || (pid !== process.pid && isRunning(pid))) {
                 console.error(
                     chalk.red(
-                        `❌ Another ABR run (pid ${pid || 'unknown'}) is in progress. If not, remove "${file}".`,
+                        `❌ Another ABR run (pid ${pid || 'unknown'}) is in progress. If not, remove "${file}", e.g. via sudo.`,
                     ),
                 );
                 return false;
             }
 
             // a killed run's lock. replaced by one run at a time, so a fresh lock is never removed.
+            // the breaker of a run killed while replacing it is removed the same way as a lock.
+            const breakerPid = Number(readLock(breaker));
+            if (breakerPid && !isRunning(breakerPid)) {
+                fs.rmSync(breaker, { force: true });
+            }
             if (create(breaker)) {
                 try {
                     if (Number(readLock(file)) === pid) {
@@ -67,19 +72,31 @@ export function acquireLock() {
 
 /**
  * Creates the file with this run's pid, `false` if it exists.
- * Linked from a full temp file, so it never exists without the pid.
+ * Linked from a full temp file, so it never exists without the pid, or written directly where links aren't supported.
  */
 function create(file) {
     const temp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}`;
-    fs.writeFileSync(temp, String(process.pid));
     try {
+        fs.writeFileSync(temp, String(process.pid));
         fs.linkSync(temp, file);
         return true;
     } catch (error) {
         if (error.code === 'EEXIST') return false;
-        throw error;
+        if (
+            !['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'].includes(error.code)
+        ) {
+            throw error;
+        }
     } finally {
         fs.rmSync(temp, { force: true });
+    }
+
+    try {
+        fs.writeFileSync(file, String(process.pid), { flag: 'wx' });
+        return true;
+    } catch (error) {
+        if (error.code === 'EEXIST') return false;
+        throw error;
     }
 }
 
@@ -88,7 +105,7 @@ function hold(file) {
         try {
             if (readLock(file) === String(process.pid)) fs.rmSync(file);
         } catch {
-            // left for the next run's stale check.
+            // left for the next run, which replaces a dead pid's lock.
         }
     });
     return true;

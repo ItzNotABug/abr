@@ -176,8 +176,8 @@ export default class Restore {
         const volumes = new Set();
         const appwriteFiles = new Set();
         const unexpected = new Set();
-        // names become `docker run -v` sources, anything else could be a host path.
-        const volumeName = /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/;
+        // names become `docker run -v` sources & are removed first, so only the supported project's volumes.
+        const volumeName = /^appwrite_[a-zA-Z0-9_.-]+$/;
         // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
         // numeric owners, so a crafted user name can't look like the quoted name.
         const entry =
@@ -222,10 +222,17 @@ export default class Restore {
                 } else if (!dir) {
                     continue;
                 } else if (dir === 'appwrite') {
-                    // bind-mounted to the host, ABR only writes the two files there.
+                    // bind-mounted to the host & read by compose, ABR only writes the two files there.
                     if (parts.length === 2) continue;
-                    if (type === '-') appwriteFiles.add(parts[2]);
-                    else unexpected.add(name);
+                    if (
+                        type === '-' &&
+                        parts.length === 3 &&
+                        ['.env', 'docker-compose.yml'].includes(parts[2])
+                    ) {
+                        appwriteFiles.add(parts[2]);
+                    } else {
+                        unexpected.add(name);
+                    }
                 } else if (volumeName.test(dir)) {
                     volumes.add(dir);
                 } else {

@@ -17,6 +17,8 @@ export function backupsDir() {
  * Returns an unused path for a new backup archive.
  */
 export function newBackupFile() {
+    // created by ABR, `docker run -v` would create it as root.
+    fs.mkdirSync(backupsDir(), { recursive: true });
     const timestamp = new Date()
         .toISOString()
         .slice(0, 19)

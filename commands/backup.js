@@ -106,7 +106,9 @@ export default class Backup {
         let measure;
         try {
             volumes = await existingVolumes(appwriteVolumes);
-            measure = await measureVolumes(volumes, mariadb.volume);
+            if (volumes.includes(mariadb.volume)) {
+                measure = await measureVolumes(volumes, mariadb.volume);
+            }
             loader.stop();
         } catch (error) {
             loader.stop();
@@ -117,8 +119,6 @@ export default class Backup {
             process.exitCode = 1;
             return;
         }
-        printVolumeSizes(measure, appwriteVolumes);
-
         if (!volumes.includes(mariadb.volume)) {
             console.log(
                 chalk.red(
@@ -128,6 +128,8 @@ export default class Backup {
             process.exitCode = 1;
             return;
         }
+
+        printVolumeSizes(measure, appwriteVolumes);
 
         await this.#performBackup(mariadb, volumes, measure);
         this.#backupType = '';
@@ -302,7 +304,7 @@ export default class Backup {
                 file,
                 signal,
                 verify:
-                    files &&
+                    files !== null &&
                     (async () => (await listMariaDBFiles(mariadb)) === files),
             });
         } finally {

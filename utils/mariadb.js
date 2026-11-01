@@ -59,7 +59,7 @@ export async function listMariaDBFiles({ volume }) {
             { entrypoint: 'sh', mounts: [`${volume}:/data:ro`] },
             '-c',
             // sorted, directory order may differ between runs.
-            'cd /data && find . -exec stat -c "%n %s %y %z" {} + | sort',
+            'set -o pipefail; cd /data && find . -exec stat -c "%n %s %y %z" {} + | sort',
         ),
     );
     return stdout;

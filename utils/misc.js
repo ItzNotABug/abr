@@ -38,6 +38,11 @@ export const appwriteVolumes = [
 ];
 
 /**
+ * Install files archived with the volumes, from the `appwrite` folder.
+ */
+export const installFiles = ['.env', 'docker-compose.yml'];
+
+/**
  * Marks containers & volumes created by ABR, to find leftovers of killed runs.
  * Valued `backup` on the snapshot & archive containers, which hold locks & write.
  */

@@ -10,6 +10,7 @@ import {
     checkDocker,
     docker,
     helperArgs,
+    installFiles,
     restartAppwriteStack,
     signalExitCode,
 } from '../utils/misc.js';
@@ -28,6 +29,11 @@ const loader = loading('');
  * Extracts archives. GNU tar, busybox's ignores the PAX headers of files over 8 GB.
  */
 const extractorImage = 'debian:stable-slim';
+
+/**
+ * MariaDB's volume in supported installs, a backup without it can't be restored.
+ */
+const mariadbVolume = 'appwrite_appwrite-mariadb';
 
 export default class Restore {
     // `checking`, then `changing` the install, which an interrupt leaves incomplete, then `restarting`.
@@ -177,7 +183,7 @@ export default class Restore {
         const appwriteFiles = new Set();
         const unexpected = new Set();
         // names become `docker run -v` sources & are removed first, so only the supported project's volumes.
-        const volumeName = /^appwrite_[a-zA-Z0-9_.-]+$/;
+        const volumeName = /^appwrite_appwrite-[a-z0-9-]+$/;
         // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
         // numeric owners, so a crafted user name can't look like the quoted name.
         const entry =
@@ -227,7 +233,7 @@ export default class Restore {
                     if (
                         type === '-' &&
                         parts.length === 3 &&
-                        ['.env', 'docker-compose.yml'].includes(parts[2])
+                        installFiles.includes(parts[2])
                     ) {
                         appwriteFiles.add(parts[2]);
                     } else {
@@ -262,14 +268,12 @@ export default class Restore {
             return null;
         }
 
-        const missing = ['.env', 'docker-compose.yml'].filter(
-            (name) => !appwriteFiles.has(name),
+        const missing = [...installFiles, mariadbVolume].filter(
+            (name) => !appwriteFiles.has(name) && !volumes.has(name),
         );
-        if (missing.length || volumes.size === 0) {
+        if (missing.length) {
             console.log(
-                chalk.red(
-                    `❌ The backup is missing ${missing.length ? missing.join(' & ') : 'the volumes'}.`,
-                ),
+                chalk.red(`❌ The backup is missing ${missing.join(' & ')}.`),
             );
             return null;
         }

@@ -56,13 +56,22 @@ export async function isMariaDBVolumeUsedByOthers({ container, volume }) {
 export async function listMariaDBFiles({ volume }) {
     const { stdout } = await docker(
         helperArgs(
-            { entrypoint: 'sh', mounts: [`${volume}:/data:ro`] },
+            {
+                entrypoint: 'find',
+                mounts: [`${volume}:/data:ro`],
+                workdir: '/data',
+            },
+            '.',
+            '-exec',
+            'stat',
             '-c',
-            // sorted, directory order may differ between runs.
-            'set -o pipefail; cd /data && find . -exec stat -c "%n %s %y %z" {} + | sort',
+            '%n %s %y %z',
+            '{}',
+            '+',
         ),
     );
-    return stdout;
+    // sorted, directory order may differ between runs.
+    return stdout.split('\n').sort().join('\n');
 }
 
 /**

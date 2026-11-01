@@ -11,6 +11,7 @@ import {
     docker,
     dockerSync,
     helperArgs,
+    installFiles,
     restartAppwriteStack,
     resumeAppwriteStack,
     setHandlingInterrupts,
@@ -140,9 +141,10 @@ export default class Backup {
      */
     static #checkForAppwriteFolder() {
         // `.env` too, `docker run -v` would create it as a folder.
-        const files = ['docker-compose.yml', '.env'];
         if (
-            files.every((file) => fs.existsSync(path.join(appwriteDir(), file)))
+            installFiles.every((file) =>
+                fs.existsSync(path.join(appwriteDir(), file)),
+            )
         ) {
             console.log(chalk.green('✅ Appwrite directory detected.'));
             return true;
@@ -457,8 +459,10 @@ export default class Backup {
                             (volume) =>
                                 `${replace?.[volume] ?? volume}:/backup/${volume}`,
                         ),
-                        `${path.join(appwriteDir(), '.env')}:/backup/appwrite/.env`,
-                        `${path.join(appwriteDir(), 'docker-compose.yml')}:/backup/appwrite/docker-compose.yml`,
+                        ...installFiles.map(
+                            (file) =>
+                                `${path.join(appwriteDir(), file)}:/backup/appwrite/${file}`,
+                        ),
                         `${path.dirname(file)}:/archive`,
                     ],
                     env: [`BACKUP_FILENAME=${path.basename(partial)}`],

@@ -1,70 +1,21 @@
 import chalk from 'chalk';
-import { execa, execaSync } from 'execa';
-import * as path from 'path';
-import { mariadbVolume } from './misc.js';
+import {
+    abrLabel,
+    docker,
+    dockerSync,
+    helperArgs,
+    sleep,
+    sleepSync,
+} from './misc.js';
 
 /**
- * Appwrite's MariaDB container.
- */
-const mariadbContainer = 'appwrite-mariadb';
-
-/**
- * Marks snapshot containers & volumes, to find leftovers of killed runs.
- */
-export const snapshotLabel = 'com.itznotabug.abr.snapshot';
-
-/**
- * Checks that the installation runs on MariaDB,
- * Appwrite 1.9+ may also use MongoDB or PostgreSQL.
- */
-export async function checkDatabaseAdapter() {
-    // resolved by compose itself: `.env`, shell overrides, quoting & comments.
-    const config = await execa(
-        'docker',
-        ['compose', 'config', '--format', 'json'],
-        { cwd: path.join(process.cwd(), 'appwrite'), reject: false },
-    );
-
-    let services;
-    try {
-        services = Object.values(JSON.parse(config.stdout).services);
-    } catch {
-        console.error(
-            chalk.red('❌ Could not read the Appwrite compose config:'),
-            config.stderr?.trim() || config.message || 'unexpected output.',
-        );
-        return false;
-    }
-
-    // installs before 1.9 have no adapter setting & always run MariaDB.
-    const adapter =
-        services
-            .map((service) => service.environment?._APP_DB_ADAPTER)
-            .find(Boolean) ??
-        (services.some((service) =>
-            /(^|\/)mariadb(:|@|$)/.test(service.image ?? ''),
-        )
-            ? 'mariadb'
-            : 'unknown');
-    if (adapter === 'mariadb') return true;
-
-    console.error(
-        chalk.red(
-            `❌ Unsupported database: ${adapter}. Only MariaDB based Appwrite installs are supported.`,
-        ),
-    );
-    return false;
-}
-
-/**
- * Returns the MariaDB container's `status`, `startedAt`, `image` id & `env`, or `null` if it doesn't exist.
+ * Returns the MariaDB container's `status`, `image` id & `env`, or `null` if it doesn't exist.
  *
  * Throws on any other failure, callers must not mistake it for a stopped database.
  */
-export async function inspectMariaDB() {
-    const { failed, stdout, stderr } = await execa(
-        'docker',
-        ['container', 'inspect', mariadbContainer],
+export async function inspectMariaDB(container) {
+    const { failed, stdout, stderr } = await docker(
+        ['container', 'inspect', container],
         { reject: false },
     );
     if (failed) {
@@ -76,7 +27,6 @@ export async function inspectMariaDB() {
         const [{ State, Image, Config }] = JSON.parse(stdout);
         return {
             status: State.Status,
-            startedAt: State.StartedAt,
             image: Image,
             env: Config.Env ?? [],
         };
@@ -88,22 +38,47 @@ export async function inspectMariaDB() {
 /**
  * Whether a running or paused container other than MariaDB's uses its volume. Throws if unknown.
  */
-export async function isMariaDBVolumeUsedByOthers() {
-    const { failed, stdout, stderr } = await execa(
-        'docker',
-        ['ps', '--format', '{{.Names}}', '--filter', `volume=${mariadbVolume}`],
+export async function isMariaDBVolumeUsedByOthers({ container, volume }) {
+    const { failed, stdout, stderr } = await docker(
+        ['ps', '--format', '{{.Names}}', '--filter', `volume=${volume}`],
         { reject: false },
     );
     if (failed) throw new Error(stderr?.trim() || 'docker ps failed.');
 
-    return stdout.split('\n').some((name) => name && name !== mariadbContainer);
+    return stdout.split('\n').some((name) => name && name !== container);
 }
 
 /**
- * Returns a unique snapshot container & volume name, without `appwrite` as restores remove volumes by that filter.
+ * Lists the volume's files with sizes & change times, any write changes it. Throws on failure.
+ *
+ * Stopped MariaDBs are copied as is, this tells if one wrote during the copy, e.g. started or unpaused briefly.
  */
-export function snapshotName() {
-    return `abr-mariadb-snapshot-${Date.now()}`;
+export async function listMariaDBFiles({ volume }) {
+    const { stdout } = await docker(
+        helperArgs(
+            {
+                entrypoint: 'find',
+                mounts: [`${volume}:/data:ro`],
+                workdir: '/data',
+            },
+            '.',
+            '-exec',
+            'stat',
+            '-c',
+            '%n %s %y %z',
+            '{}',
+            '+',
+        ),
+    );
+    // sorted, directory order may differ between runs.
+    return stdout.split('\n').sort().join('\n');
+}
+
+/**
+ * Returns the snapshot container & volume name for a backup.
+ */
+export function snapshotName(id) {
+    return `abr-mariadb-snapshot-${id}`;
 }
 
 /**
@@ -116,11 +91,8 @@ export function snapshotName() {
 export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
     loader.start(chalk.blue('Creating MariaDB snapshot...'));
 
-    const fail = async (message, suggestOtherTypes = true) => {
+    const fail = (message, suggestOtherTypes = true) => {
         loader.stop();
-
-        // the same Ctrl+C can fail the docker CLI before the abort handler runs.
-        await new Promise((resolve) => setTimeout(resolve, 100));
         if (signal.aborted) return false;
 
         console.log(chalk.red('❌ Error creating MariaDB snapshot:'), message);
@@ -135,14 +107,19 @@ export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
     const credentials = rootCredentials(mariadb.env);
     if (!credentials) {
         return fail(
-            `MariaDB root password not found in ${mariadbContainer} environment.`,
+            `MariaDB root password not found in ${mariadb.container} environment.`,
         );
     }
 
     // e.g. a sidecar of a killed run, still holding backup locks & disk space.
-    const running = await execa(
-        'docker',
-        ['ps', '--format', '{{.Names}}', '--filter', `label=${snapshotLabel}`],
+    const running = await docker(
+        [
+            'ps',
+            '--format',
+            '{{.Names}}',
+            '--filter',
+            `label=${abrLabel}=backup`,
+        ],
         { reject: false },
     );
     if (running.stdout?.trim()) {
@@ -155,47 +132,34 @@ export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
 
     try {
         signal.throwIfAborted();
-        await execa(
-            'docker',
-            ['volume', 'create', '--label', snapshotLabel, snapshot],
-            { cancelSignal: signal },
+        await docker(
+            ['volume', 'create', '--label', `${abrLabel}=snapshot`, snapshot],
+            {
+                cancelSignal: signal,
+            },
         );
 
         // password via env, not argv, to keep it out of `ps`. `--init` forwards signals.
-        await execa(
-            'docker',
-            [
-                'run',
-                '--rm',
-                '--init',
-                '--name',
-                snapshot,
-                '--label',
-                snapshotLabel,
-                '--volumes-from',
-                `${mariadbContainer}:ro`,
-                '--network',
-                `container:${mariadbContainer}`,
-                '-v',
-                `${snapshot}:/snapshot`,
-                '-e',
-                'MYSQL_PWD',
-                '-e',
-                'ABR_PASSWORD_FILE',
-                '--entrypoint',
-                'sh',
-                mariadb.image,
+        await docker(
+            helperArgs(
+                {
+                    entrypoint: 'sh',
+                    image: mariadb.image,
+                    name: snapshot,
+                    role: 'backup',
+                    extra: [
+                        '--volumes-from',
+                        `${mariadb.container}:ro`,
+                        '--network',
+                        `container:${mariadb.container}`,
+                    ],
+                    mounts: [`${snapshot}:/snapshot`],
+                    env: ['MYSQL_PWD', 'ABR_PASSWORD_FILE'],
+                },
                 '-c',
                 [
                     'set -e',
                     'if [ -n "$ABR_PASSWORD_FILE" ]; then MYSQL_PWD="$(cat "$ABR_PASSWORD_FILE")"; export MYSQL_PWD; fi',
-                    // a full copy on the live database's disk, kept while its compressed copy is archived.
-                    // so room for both, plus headroom. temp & redo log files are excluded.
-                    'size=$(du -sk --exclude=ibtmp1 --exclude="ib_logfile*" /var/lib/mysql 2>/dev/null | cut -f1)',
-                    "free=$(df -Pk /snapshot | awk 'NR == 2 { print $4 }')",
-                    'if [ -z "$size" ] || [ -z "$free" ]; then echo "could not determine the free disk space." >&2; exit 1; fi',
-                    'need=$((size * 2 + size / 10))',
-                    'if [ "$free" -le "$need" ]; then echo "not enough disk space, the snapshot & its compressed copy need ~$((need / 1024)) MB, $((free / 1024)) MB free." >&2; exit 1; fi',
                     // per-table logs get huge, keep only the tail for errors.
                     'run() { "$@" > /tmp/abr.log 2>&1 || { tail -n 20 /tmp/abr.log >&2; exit 1; }; }',
                     // backup locks only wait on explicit `LOCK TABLES`, fail instead of hanging on them.
@@ -206,7 +170,7 @@ export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
                     'for f in .my-healthcheck.cnf mysql_upgrade_info mariadb_upgrade_info multi-master.info; do [ -f "/var/lib/mysql/$f" ] && cp -p "/var/lib/mysql/$f" /snapshot/; done',
                     'chown -R mysql:mysql /snapshot',
                 ].join('\n'),
-            ],
+            ),
             {
                 cancelSignal: signal,
                 env: {
@@ -236,19 +200,15 @@ export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
  * Also stops the given `containers`, e.g. an archive container still using the volume.
  */
 export async function removeMariaDBSnapshot(snapshot, ...containers) {
-    await execa('docker', ['rm', '-f', snapshot, ...containers], {
-        reject: false,
-    });
+    await docker(['rm', '-f', snapshot, ...containers], { reject: false });
 
     // stays in use briefly while an interrupted sidecar is torn down.
     for (let attempt = 0; attempt < 10; attempt++) {
-        const { exitCode } = await execa(
-            'docker',
-            ['volume', 'rm', '-f', snapshot],
-            { reject: false },
-        );
+        const { exitCode } = await docker(['volume', 'rm', '-f', snapshot], {
+            reject: false,
+        });
         if (exitCode === 0) return;
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await sleep(500);
     }
 
     warnSnapshotLeft(snapshot);
@@ -258,19 +218,14 @@ export async function removeMariaDBSnapshot(snapshot, ...containers) {
  * {@link removeMariaDBSnapshot} for a forced exit.
  */
 export function removeMariaDBSnapshotSync(snapshot, ...containers) {
-    execaSync('docker', ['rm', '-f', snapshot, ...containers], {
-        reject: false,
-    });
+    dockerSync(['rm', '-f', snapshot, ...containers], { reject: false });
 
-    const pause = new Int32Array(new SharedArrayBuffer(4));
     for (let attempt = 0; attempt < 10; attempt++) {
-        const { exitCode } = execaSync(
-            'docker',
-            ['volume', 'rm', '-f', snapshot],
-            { reject: false },
-        );
+        const { exitCode } = dockerSync(['volume', 'rm', '-f', snapshot], {
+            reject: false,
+        });
         if (exitCode === 0) return;
-        Atomics.wait(pause, 0, 0, 500);
+        sleepSync(500);
     }
 
     warnSnapshotLeft(snapshot);
@@ -292,9 +247,8 @@ function warnSnapshotLeft(snapshot) {
  * Warns about snapshots left by killed runs. Not removed, they may belong to a running backup.
  */
 export async function warnLeftoverSnapshots() {
-    const { stdout } = await execa(
-        'docker',
-        ['volume', 'ls', '-q', '--filter', `label=${snapshotLabel}`],
+    const { stdout } = await docker(
+        ['volume', 'ls', '-q', '--filter', `label=${abrLabel}=snapshot`],
         { reject: false },
     );
     const leftovers = stdout?.split('\n').filter(Boolean) ?? [];

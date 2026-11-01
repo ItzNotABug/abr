@@ -187,6 +187,7 @@ export async function checkDocker(loader) {
  * This will take a while because this also fetches all the pruned images from docker hub.
  *
  * @param onStart gets the running `docker compose` command.
+ * @returns {Promise<boolean>} whether it worked.
  */
 export async function restartAppwriteStack(loader, onStart = () => {}) {
     loader.start(chalk.blue('Restarting appwrite (This can take a while...)'));
@@ -197,6 +198,7 @@ export async function restartAppwriteStack(loader, onStart = () => {}) {
 
         loader.stop();
         console.log(chalk.green('✅ Appwrite stack restarted.'));
+        return true;
     } catch (error) {
         loader.stop();
         console.error(
@@ -204,6 +206,7 @@ export async function restartAppwriteStack(loader, onStart = () => {}) {
             error.message,
         );
         process.exitCode = 1;
+        return false;
     }
 }
 
@@ -211,6 +214,7 @@ export async function restartAppwriteStack(loader, onStart = () => {}) {
  * Resumes the appwrite stack.
  *
  * @param onStart gets the running `docker compose` command.
+ * @returns {Promise<boolean>} whether it worked.
  */
 export async function resumeAppwriteStack(loader, onStart = () => {}) {
     loader.start(chalk.blue('Resuming appwrite'));
@@ -221,6 +225,7 @@ export async function resumeAppwriteStack(loader, onStart = () => {}) {
 
         loader.stop();
         console.log(chalk.green('✅ Appwrite stack resumed.'));
+        return true;
     } catch (error) {
         loader.stop();
         console.error(
@@ -228,5 +233,6 @@ export async function resumeAppwriteStack(loader, onStart = () => {}) {
             error.message,
         );
         process.exitCode = 1;
+        return false;
     }
 }

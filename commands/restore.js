@@ -82,6 +82,18 @@ export default class Restore {
             });
         }
 
+        // restores write `appwrite_*` volumes, which compose only uses as project `appwrite`.
+        const project = process.env.COMPOSE_PROJECT_NAME;
+        if (project && project !== 'appwrite') {
+            console.log(
+                chalk.red(
+                    `❌ COMPOSE_PROJECT_NAME is "${project}", only the default "appwrite" project can be restored. Unset it & try again.`,
+                ),
+            );
+            process.exitCode = 1;
+            return;
+        }
+
         // the archive is checked before anything is removed.
         const file = await this.#selectBackup();
         const volumes =

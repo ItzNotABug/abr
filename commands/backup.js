@@ -313,13 +313,12 @@ export default class Backup {
             if (snapshot) await removeMariaDBSnapshot(snapshot, archive);
             const track = (command) => (stack.command = command);
             if (stack.stopped) {
-                await restartAppwriteStack(loader, track);
-                stack.stopped = false;
+                stack.stopped = !(await restartAppwriteStack(loader, track));
             }
             if (stack.paused) {
-                await resumeAppwriteStack(loader, track);
-                stack.paused = false;
+                stack.paused = !(await resumeAppwriteStack(loader, track));
             }
+            this.#warnAppwriteDown(stack);
             setHandlingInterrupts(false);
             signals.forEach((name) => process.off(name, onInterrupt));
 
@@ -410,7 +409,7 @@ export default class Backup {
     }
 
     /**
-     * Tells how to bring Appwrite back, when a forced exit leaves it stopped or paused.
+     * Tells how to bring Appwrite back, when a failure or forced exit leaves it stopped or paused.
      */
     static #warnAppwriteDown(stack) {
         if (!stack.stopped && !stack.paused) return;

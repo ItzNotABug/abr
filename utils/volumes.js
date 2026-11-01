@@ -120,9 +120,15 @@ export function checkDiskSpace(measure, mariadbVolume, snapshotted) {
 
     if (
         snapshot &&
+        // as one disk: ZFS, overlay quotas & VMs report other sizes for the same space.
         !fits([
-            [measure.scratch, snapshot],
-            [measure.tmp, snapshot],
+            [
+                {
+                    ...measure.scratch,
+                    free: Math.min(measure.scratch.free, measure.tmp.free),
+                },
+                snapshot * 2,
+            ],
         ])
     ) {
         return 'snapshot';

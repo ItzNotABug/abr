@@ -50,7 +50,7 @@ export default class Restore {
      * Starts task once yargs receives the command.
      */
     static async #performTask() {
-        if (!(await checkDocker(loader)) || !acquireLock()) {
+        if (!(await checkDocker(loader)) || !(await acquireLock())) {
             process.exitCode = 1;
             return;
         }
@@ -178,8 +178,8 @@ export default class Restore {
         const unexpected = new Set();
         // names become `docker run -v` sources, anything else could be a host path.
         const volumeName = /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/;
-        // GNU tar's verbose listing: type & mode, owner, size, date, time, name.
-        const entry = /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s(.*)$/;
+        // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
+        const entry = /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s"((?:[^"\\]|\\.)*)"/;
         try {
             // with the extractor's tar, which reads it the same way. streamed, archives can hold millions of files.
             const listing = docker(
@@ -191,22 +191,21 @@ export default class Restore {
                     },
                     '-tvzPf',
                     `/archive/${path.basename(file)}`,
+                    '--quoting-style=c',
                 ),
                 { buffer: { stdout: false } },
             );
             for await (const line of listing) {
-                const [, type, rest = ''] = line.match(entry) ?? [];
-                // symlinks list their target after the name.
-                const name = type === 'l' ? rest.split(' -> ')[0] : rest;
-                const parts = name
-                    .replace(/^\/+/, '')
-                    .replace(/\/$/, '')
-                    .split('/');
+                const [, type, quoted] = line.match(entry) ?? [];
+                const name = quoted === undefined ? '' : unquote(quoted);
+                // empty parts, as in `backup//x`, are dropped by tar too.
+                const parts = name.split('/').filter(Boolean);
                 const [root, dir] = parts;
 
                 // GNU tar skips `..` members & fails, after the install is gone.
-                // hard links can fail across volume mounts, ABR's archives never have them.
-                if (!type || type === 'h' || parts.includes('..')) {
+                // only folders, files & symlinks: hard links can fail across volume mounts,
+                // devices & fifos don't belong in a backup. ABR's archives have neither.
+                if (!['d', '-', 'l'].includes(type) || parts.includes('..')) {
                     unexpected.add(name || line);
                 } else if (root !== 'backup') {
                     unexpected.add(root);
@@ -475,4 +474,24 @@ export default class Restore {
         console.log(chalk.green('✅ Restoration completed successfully.'));
         return true;
     }
+}
+
+/**
+ * Decodes a name quoted by GNU tar's `--quoting-style=c`, with octal escapes for non-ASCII bytes.
+ */
+function unquote(quoted) {
+    const named = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11 };
+    const bytes = [];
+    for (let i = 0; i < quoted.length; i++) {
+        if (quoted[i] !== '\\') {
+            bytes.push(...Buffer.from(quoted[i]));
+        } else if (/[0-7]{3}/.test(quoted.slice(i + 1, i + 4))) {
+            bytes.push(parseInt(quoted.slice(i + 1, i + 4), 8));
+            i += 3;
+        } else {
+            const escaped = quoted[++i];
+            bytes.push(named[escaped] ?? escaped.charCodeAt(0));
+        }
+    }
+    return Buffer.from(bytes).toString('utf8');
 }

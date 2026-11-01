@@ -70,7 +70,7 @@ export default class Backup {
         if (
             !(await checkDocker(loader)) ||
             !this.#checkForAppwriteFolder() ||
-            !acquireLock()
+            !(await acquireLock())
         ) {
             process.exitCode = 1;
             return;

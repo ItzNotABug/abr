@@ -22,6 +22,11 @@ ${chalk.blue('_'.repeat(146))}
 `;
 
 /**
+ * Appwrite's MariaDB docker volume.
+ */
+export const mariadbVolume = 'appwrite_appwrite-mariadb';
+
+/**
  * Appwrite docker volumes.
  */
 export const appwriteVolumes = [
@@ -30,7 +35,7 @@ export const appwriteVolumes = [
     'appwrite_appwrite-builds',
     'appwrite_appwrite-config',
     'appwrite_appwrite-executor',
-    'appwrite_appwrite-mariadb',
+    mariadbVolume,
     'appwrite_appwrite-uploads',
     'appwrite_appwrite-functions',
     'appwrite_appwrite-certificates',
@@ -42,7 +47,7 @@ export const appwriteVolumes = [
 export const backupTypes = [
     {
         value: 'hot-backup',
-        name: `${chalk.bold('Hot Backup')} - Fast, Zero Downtime ${chalk.red.bold('(Experimental – Keeps Appwrite running; potential data inconsistency)')}`,
+        name: `${chalk.bold('Hot Backup')} - Fast, Zero Downtime ${chalk.yellow.bold('(Keeps Appwrite running; consistent database snapshot, files copied live)')}`,
     },
     {
         value: 'semi-hot-backup',
@@ -85,7 +90,9 @@ export async function checkDocker(loader) {
 }
 
 /**
- * Restarts the appwrite stack. Note that this will take a while because this also fetches all the pruned images from docker hub.
+ * Restarts the appwrite stack.
+ *
+ * This will take a while because this also fetches all the pruned images from docker hub.
  */
 export async function restartAppwriteStack(loader) {
     loader.start(chalk.blue('Restarting appwrite (This can take a while...)'));

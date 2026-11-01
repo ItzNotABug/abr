@@ -86,15 +86,15 @@ export async function inspectMariaDB() {
 }
 
 /**
- * Whether a running or paused container other than MariaDB's uses its volume, `true` if unknown.
+ * Whether a running or paused container other than MariaDB's uses its volume. Throws if unknown.
  */
 export async function isMariaDBVolumeUsedByOthers() {
-    const { failed, stdout } = await execa(
+    const { failed, stdout, stderr } = await execa(
         'docker',
         ['ps', '--format', '{{.Names}}', '--filter', `volume=${mariadbVolume}`],
         { reject: false },
     );
-    if (failed) return true;
+    if (failed) throw new Error(stderr?.trim() || 'docker ps failed.');
 
     return stdout.split('\n').some((name) => name && name !== mariadbContainer);
 }
@@ -116,7 +116,7 @@ export function snapshotName() {
 export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
     loader.start(chalk.blue('Creating MariaDB snapshot...'));
 
-    const fail = async (message) => {
+    const fail = async (message, suggestOtherTypes = true) => {
         loader.stop();
 
         // the same Ctrl+C can fail the docker CLI before the abort handler runs.
@@ -124,7 +124,11 @@ export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
         if (signal.aborted) return false;
 
         console.log(chalk.red('❌ Error creating MariaDB snapshot:'), message);
-        console.log(chalk.yellow('⚠️  Try a semi-hot or cold backup instead.'));
+        if (suggestOtherTypes) {
+            console.log(
+                chalk.yellow('⚠️  Try a semi-hot or cold backup instead.'),
+            );
+        }
         return false;
     };
 
@@ -142,8 +146,10 @@ export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
         { reject: false },
     );
     if (running.stdout?.trim()) {
+        // pausing or stopping Appwrite would break the running backup, so no other types.
         return fail(
             `another backup is running (${running.stdout.trim().split('\n').join(', ')}). If not, remove it via "docker rm -f <name>".`,
+            false,
         );
     }
 

@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import chalk from 'chalk';
-import { execa } from 'execa';
+import { execa, execaSync } from 'execa';
 import * as path from 'path';
 import Table from 'cli-table3';
 import inquirer from 'inquirer';
@@ -253,8 +253,10 @@ export default class Backup {
             loader.stop();
             if (interruptCode) {
                 removeMariaDBSnapshotSync(snapshot, archive);
-                fs.rmSync(this.#partialFile(file), { force: true });
-                process.exit(archived ? 0 : interruptCode);
+                this.#removeArchiveSync(this.#partialFile(file));
+                process.exit(
+                    archived ? (process.exitCode ?? 0) : interruptCode,
+                );
             }
             interruptCode = signals[signal];
             controller.abort();
@@ -293,14 +295,15 @@ export default class Backup {
             Object.keys(signals).forEach((signal) =>
                 process.off(signal, onInterrupt),
             );
-            process.stdout.off('error', ignore);
-            process.stderr.off('error', ignore);
 
             // an interrupt during the final cleanup doesn't undo a finished backup.
             if (interruptCode && !archived) {
                 process.exitCode = interruptCode;
                 console.log(chalk.yellow('⚠️  Backup interrupted.'));
             }
+
+            process.stdout.off('error', ignore);
+            process.stderr.off('error', ignore);
         }
     }
 
@@ -319,8 +322,11 @@ export default class Backup {
                 `backup-${timestamp}${suffix}.tar.gz`,
             );
 
+        const taken = (file) =>
+            fs.existsSync(file) || fs.existsSync(this.#partialFile(file));
+
         let file = name('');
-        for (let i = 1; fs.existsSync(file); i++) file = name(`-${i}`);
+        for (let i = 1; taken(file); i++) file = name(`-${i}`);
         return file;
     }
 
@@ -450,11 +456,11 @@ export default class Backup {
             loader.stop();
 
             if (verify && !(await verify())) {
-                fs.rmSync(partial, { force: true });
+                await this.#removeArchive(partial);
                 return null;
             }
 
-            fs.renameSync(partial, file);
+            await this.#moveArchive(partial, file);
             console.log(chalk.green('✅ Backup completed successfully.'));
             return file;
         } catch (error) {
@@ -464,7 +470,7 @@ export default class Backup {
             if (archive) {
                 await execa('docker', ['rm', '-f', archive], { reject: false });
             }
-            fs.rmSync(partial, { force: true });
+            await this.#removeArchive(partial);
 
             // the same Ctrl+C can fail the docker CLI before the abort handler runs.
             await new Promise((resolve) => setTimeout(resolve, 100));
@@ -477,5 +483,77 @@ export default class Backup {
             process.exitCode = 1;
             return null;
         }
+    }
+
+    /**
+     * Renames an archive, falls back to root via a container as offen writes archives as root.
+     */
+    static async #moveArchive(from, to) {
+        try {
+            fs.renameSync(from, to);
+        } catch (error) {
+            if (!['EACCES', 'EPERM'].includes(error.code)) throw error;
+            await execa('docker', [
+                ...this.#archiveDirCommand(from),
+                'mv',
+                path.basename(from),
+                path.basename(to),
+            ]);
+        }
+    }
+
+    /**
+     * Removes an archive, if any. Never throws, falls back to root like {@link #moveArchive}.
+     */
+    static async #removeArchive(file) {
+        try {
+            fs.rmSync(file, { force: true });
+        } catch {
+            await execa(
+                'docker',
+                [
+                    ...this.#archiveDirCommand(file),
+                    'rm',
+                    '-f',
+                    path.basename(file),
+                ],
+                { reject: false },
+            );
+        }
+    }
+
+    /**
+     * {@link #removeArchive} for a forced exit.
+     */
+    static #removeArchiveSync(file) {
+        try {
+            fs.rmSync(file, { force: true });
+        } catch {
+            execaSync(
+                'docker',
+                [
+                    ...this.#archiveDirCommand(file),
+                    'rm',
+                    '-f',
+                    path.basename(file),
+                ],
+                { reject: false },
+            );
+        }
+    }
+
+    /**
+     * `docker run` arguments for a root shell in the archive's directory.
+     */
+    static #archiveDirCommand(file) {
+        return [
+            'run',
+            '--rm',
+            '-v',
+            `${path.dirname(file)}:/archive`,
+            '-w',
+            '/archive',
+            'alpine',
+        ];
     }
 }

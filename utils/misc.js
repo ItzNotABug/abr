@@ -109,6 +109,7 @@ export async function restartAppwriteStack(loader) {
             chalk.red('❌ Error during Appwrite restart:'),
             error.message,
         );
+        process.exitCode = 1;
     }
 }
 
@@ -130,5 +131,6 @@ export async function resumeAppwriteStack(loader) {
             chalk.red('❌ Error during Appwrite resumption:'),
             error.message,
         );
+        process.exitCode = 1;
     }
 }

@@ -30,9 +30,9 @@ const loader = loading('');
 const extractorImage = 'debian:stable-slim';
 
 export default class Restore {
-    // set once the install is being changed, an interrupt then leaves it incomplete.
-    static #changing = false;
-    static #restarting = false;
+    // `checking`, then `changing` the install, which an interrupt leaves incomplete, then `restarting`.
+    static #phase = 'checking';
+
     /**
      * The restore command for `yargs` to manage.
      */
@@ -56,16 +56,16 @@ export default class Restore {
         }
 
         // exits via `process.exit` to release the lock, attached docker commands get the same Ctrl+C.
-        for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+        for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']) {
             process.on(name, () => {
                 loader.stop();
-                if (this.#changing) {
+                if (this.#phase === 'changing') {
                     console.log(
                         chalk.yellow(
                             '⚠️  Restore interrupted, the install is incomplete. Run "abr restore" again.',
                         ),
                     );
-                } else if (this.#restarting) {
+                } else if (this.#phase === 'restarting') {
                     console.log(
                         chalk.yellow(
                             `⚠️  Restore complete, but Appwrite may be partly started. Run "docker compose up -d" in ${appwriteDir()}.`,
@@ -80,14 +80,14 @@ export default class Restore {
         const file = await this.#selectBackup();
         const volumes =
             file &&
-            (await this.#pullImages()) &&
+            (await this.#pullExtractor()) &&
             (await this.#readArchive(file));
         if (
             !volumes ||
             !(await this.#removeRemnants(volumes)) ||
             !(await this.#extractArchive(file, volumes))
         ) {
-            if (this.#changing) {
+            if (this.#phase === 'changing') {
                 console.log(
                     chalk.yellow(
                         '⚠️  The install is incomplete. Fix the error above & run "abr restore" again.',
@@ -97,8 +97,7 @@ export default class Restore {
             process.exitCode = 1;
             return;
         }
-        this.#changing = false;
-        this.#restarting = true;
+        this.#phase = 'restarting';
 
         await restartAppwriteStack(loader);
     }
@@ -181,6 +180,7 @@ export default class Restore {
         const volumeName = /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/;
         // GNU tar's verbose listing: type & mode, owner, size, date, time, name.
         const entry = /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s(.*)$/;
+        const members = new Set();
         try {
             // with the extractor's tar, which reads it the same way. streamed, archives can hold millions of files.
             const listing = docker(
@@ -197,22 +197,24 @@ export default class Restore {
             );
             for await (const line of listing) {
                 const [, type, rest = ''] = line.match(entry) ?? [];
-                // links list their target after the name.
-                const [name, target] = rest.split(
-                    type === 'h' ? ' link to ' : ' -> ',
-                );
-                // hard links point to members, which must be extracted too.
-                const outside =
-                    type === 'h' &&
-                    !/^\/*backup\/(?!.*(^|\/)\.\.(\/|$))/.test(target ?? '');
-                const parts = name
-                    .replace(/^\/+/, '')
-                    .replace(/\/$/, '')
-                    .split('/');
+                const [name, target] =
+                    type === 'h'
+                        ? hardLink(rest, members)
+                        : // symlinks list their target after the name.
+                          [rest.split(' -> ')[0]];
+                const parts = normalize(name ?? '').split('/');
                 const [root, dir] = parts;
+                members.add(parts.join('/'));
 
                 // GNU tar skips `..` members & fails, after the install is gone.
-                if (!type || parts.includes('..') || outside) {
+                // hard links must point to an earlier member in the same mount.
+                if (
+                    !type ||
+                    parts.includes('..') ||
+                    (type === 'h' &&
+                        target?.split('/').slice(0, 2).join('/') !==
+                            parts.slice(0, 2).join('/'))
+                ) {
                     unexpected.add(name || line);
                 } else if (root !== 'backup') {
                     unexpected.add(root);
@@ -265,23 +267,22 @@ export default class Restore {
     }
 
     /**
-     * Pulls the images restoring needs, before anything is removed.
+     * Pulls the extractor, before anything is removed.
      */
-    static async #pullImages() {
+    static async #pullExtractor() {
         loader.start(chalk.blue('Preparing the restore...'));
         try {
-            for (const image of [extractorImage]) {
-                const { failed } = await docker(['image', 'inspect', image], {
-                    reject: false,
-                });
-                if (failed) await docker(['pull', image]);
-            }
+            const { failed } = await docker(
+                ['image', 'inspect', extractorImage],
+                { reject: false },
+            );
+            if (failed) await docker(['pull', extractorImage]);
             loader.stop();
             return true;
         } catch (error) {
             loader.stop();
             console.log(
-                chalk.red('❌ Could not pull the images to restore with:'),
+                chalk.red(`❌ Could not pull ${extractorImage}:`),
                 error.stderr?.trim() || error.message,
             );
             return false;
@@ -354,7 +355,7 @@ export default class Restore {
 
         const names = (type) =>
             remnants.filter((r) => r.type === type).map((r) => r.name);
-        this.#changing = true;
+        this.#phase = 'changing';
         try {
             const containers = names('Container');
             if (containers.length) {
@@ -432,7 +433,7 @@ export default class Restore {
      * Extracts the archive straight into the volumes & the `appwrite` folder, as root to keep file owners.
      */
     static async #extractArchive(file, volumes) {
-        this.#changing = true;
+        this.#phase = 'changing';
         loader.start(chalk.blue('Restoring volumes...'));
 
         // the `appwrite` folder is handed to the user running ABR, files in volumes keep their owners.
@@ -482,4 +483,27 @@ export default class Restore {
         console.log(chalk.green('✅ Restoration completed successfully.'));
         return true;
     }
+}
+
+/**
+ * A member's name without leading & trailing slashes.
+ */
+function normalize(name) {
+    return name.replace(/^\/+/, '').replace(/\/$/, '');
+}
+
+/**
+ * Splits a hard link's listing into its name & target, the target being an earlier member.
+ * Either may contain ` link to `, so the split that names a member wins.
+ *
+ * @returns {[string, string|undefined]} the target is `undefined` if no earlier member matches.
+ */
+function hardLink(rest, members) {
+    const separator = ' link to ';
+    for (let i = rest.indexOf(separator); i !== -1; ) {
+        const target = normalize(rest.slice(i + separator.length));
+        if (members.has(target)) return [rest.slice(0, i), target];
+        i = rest.indexOf(separator, i + 1);
+    }
+    return [rest.split(separator)[0], undefined];
 }

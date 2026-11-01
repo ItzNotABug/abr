@@ -214,17 +214,14 @@ export default class Backup {
         if (space === 'snapshot') {
             console.log(
                 chalk.red(
-                    '❌ Not enough disk space for the MariaDB snapshot, which is taken next to the live database.',
+                    '❌ Not enough disk space in Docker’s storage for the MariaDB snapshot & its compressed copy.',
                 ),
             );
             process.exitCode = 1;
             return;
         }
-        if (
-            space === 'archive' &&
-            !(await this.#confirmLowSpace(this.#backupType !== 'cold-backup'))
-        ) {
-            process.exitCode = 1;
+        if (space === 'archive' && !(await this.#confirmLowSpace())) {
+            process.exitCode ||= 1;
             return;
         }
 
@@ -335,28 +332,32 @@ export default class Backup {
 
     /**
      * Asks whether to go ahead when the archive may not fit, `false` if declined or not interactive.
-     *
-     * @param live whether Appwrite keeps or resumes running on that disk.
      */
-    static async #confirmLowSpace(live) {
-        const risk = live
-            ? ' If the disk fills up, Appwrite may fail writes until space is freed.'
-            : '';
-        const message = `The size is estimated without compression, the archive may still fit.${risk}`;
+    static async #confirmLowSpace() {
+        // every type has Appwrite running again on these disks afterwards.
+        const message =
+            'The size is estimated without compression, the archive may still fit. If a disk fills up, Appwrite may fail writes until space is freed.';
         if (!process.stdin.isTTY) {
             console.log(chalk.red(`❌ Not enough disk space. ${message}`));
             return false;
         }
 
-        const { proceed } = await inquirer.prompt([
-            {
-                type: 'confirm',
-                name: 'proceed',
-                message: `${message} Continue anyway?`,
-                default: false,
-            },
-        ]);
-        return proceed;
+        try {
+            const { proceed } = await inquirer.prompt([
+                {
+                    type: 'confirm',
+                    name: 'proceed',
+                    message: `${message} Continue anyway?`,
+                    default: false,
+                },
+            ]);
+            return proceed;
+        } catch (error) {
+            // Ctrl+C at the prompt.
+            if (error.name !== 'ExitPromptError') throw error;
+            process.exitCode = signalExitCode('SIGINT');
+            return false;
+        }
     }
 
     /**
@@ -486,12 +487,12 @@ export default class Backup {
             return false;
         }
 
-        // a complete archive, but the interrupt asked for no backup.
-        const verified =
-            !signal.aborted && (!verify || (await this.#verifyArchive(verify)));
-        if (!verified || signal.aborted) {
+        // a complete archive is still removed if the interrupt came first.
+        const failed =
+            !signal.aborted && verify && !(await this.#verifyArchive(verify));
+        if (failed || signal.aborted) {
             await removePath(partial);
-            if (!signal.aborted) process.exitCode = 1;
+            if (failed) process.exitCode = 1;
             return false;
         }
 

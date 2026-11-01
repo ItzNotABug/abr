@@ -181,7 +181,7 @@ export default class Restore {
         // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
         // numeric owners, so a crafted user name can't look like the quoted name.
         const entry =
-            /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s+"((?:[^"\\]|\\.)*)"(?: -> "(?:[^"\\]|\\.)*")?$/;
+            /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s+"((?:[^"\\]|\\.)*)"(?: (?:->|link to) "(?:[^"\\]|\\.)*")?$/;
         try {
             // with the extractor's tar, which reads it the same way. streamed, archives can hold millions of files.
             const listing = docker(
@@ -223,6 +223,7 @@ export default class Restore {
                     continue;
                 } else if (dir === 'appwrite') {
                     // bind-mounted to the host, ABR only writes the two files there.
+                    if (parts.length === 2) continue;
                     if (type === '-') appwriteFiles.add(parts[2]);
                     else unexpected.add(name);
                 } else if (volumeName.test(dir)) {

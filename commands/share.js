@@ -8,6 +8,7 @@ import {
     helperImage,
     pullImages,
     signalExitCode,
+    sleep,
 } from '../utils/misc.js';
 import {
     hashFile,
@@ -239,9 +240,20 @@ export default class Share {
             }
 
             // trycloudflare's API times out at times, a new tunnel usually gets through.
+            const attempts = 5;
             let url = null;
-            for (let attempt = 1; attempt <= 3 && !interrupted; attempt++) {
+            for (
+                let attempt = 1;
+                attempt <= attempts && !interrupted;
+                attempt++
+            ) {
                 if (tunnel) await stopTunnel(tunnel);
+                if (attempt > 1) {
+                    loader.text = chalk.blue(
+                        `Starting the tunnel, attempt ${attempt} of ${attempts}...`,
+                    );
+                    await sleep(2000 * attempt);
+                }
                 tunnel = startTunnel(port);
                 try {
                     url = await Promise.race([
@@ -250,8 +262,18 @@ export default class Share {
                     ]);
                     break;
                 } catch (error) {
-                    if (attempt === 3) throw error;
+                    if (attempt === attempts) throw error;
                 }
+            }
+
+            // a new hostname takes a moment to resolve, the link is only printed once it works.
+            if (
+                url &&
+                !(await reachesPublicly(`${url}/${share.probe}`, stopped))
+            ) {
+                throw new Error(
+                    'the link did not become reachable, Cloudflare may be having issues.',
+                );
             }
             loader.stop();
 
@@ -412,4 +434,25 @@ function formatRemaining(ms) {
     return hours
         ? `${hours}:${pad(minutes)}:${pad(seconds)}`
         : `${minutes}:${pad(seconds)}`;
+}
+
+/**
+ * Whether the URL answers through the tunnel within a minute, `true` too if the share stopped meanwhile.
+ */
+async function reachesPublicly(url, stopped) {
+    let done = false;
+    stopped.then(() => (done = true));
+    for (const deadline = Date.now() + 60_000; Date.now() < deadline; ) {
+        if (done) return true;
+        try {
+            const response = await fetch(url, {
+                signal: AbortSignal.timeout(5000),
+            });
+            if (response.ok) return true;
+        } catch {
+            // not resolvable or reachable yet.
+        }
+        await sleep(2000);
+    }
+    return false;
 }

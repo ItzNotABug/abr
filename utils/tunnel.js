@@ -56,6 +56,9 @@ export function startTunnel(port) {
             },
             'tunnel',
             '--no-autoupdate',
+            // TCP, QUIC's UDP is often blocked by firewalls & nested networks.
+            '--protocol',
+            'http2',
             '--url',
             `http://127.0.0.1:${port}`,
         ),

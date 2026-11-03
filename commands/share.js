@@ -253,6 +253,7 @@ export default class Share {
                         `Starting the tunnel, attempt ${attempt} of ${attempts}...`,
                     );
                     await sleep(2000 * attempt);
+                    if (interrupted) break;
                 }
                 tunnel = startTunnel(port);
                 try {
@@ -266,21 +267,26 @@ export default class Share {
                 }
             }
 
-            // a new hostname takes a moment to resolve, the link is only printed once it works.
-            if (
+            // a new hostname takes a moment to resolve, so the link is printed once it works, or after a minute:
+            // this machine's DNS may cache the name's absence while recipients reach it fine.
+            const reachable =
                 url &&
-                !(await reachesPublicly(`${url}/${share.probe}`, stopped))
-            ) {
-                throw new Error(
-                    'the link did not become reachable, Cloudflare may be having issues.',
-                );
-            }
+                (await reachesPublicly(`${url}/${share.probe}`, stopped));
+            // stopped meanwhile, no link to print.
+            if (interrupted) url = null;
             loader.stop();
 
             if (url) {
                 share.url = url;
                 share.deadline = Date.now() + lifetime;
                 printShare(share, password);
+                if (!reachable) {
+                    console.log(
+                        chalk.yellow(
+                            '⚠️  Could not open the link from here yet, it usually works within a minute.',
+                        ),
+                    );
+                }
                 // the tunnel ending early stops the share too.
                 tunnel.exited.then(() => stop('tunnel'));
                 timer = startCountdown(share, () => stop('expired'));
@@ -437,13 +443,13 @@ function formatRemaining(ms) {
 }
 
 /**
- * Whether the URL answers through the tunnel within a minute, `true` too if the share stopped meanwhile.
+ * Whether the URL answers through the tunnel within a minute, `false` if the share stopped meanwhile.
  */
 async function reachesPublicly(url, stopped) {
     let done = false;
     stopped.then(() => (done = true));
     for (const deadline = Date.now() + 60_000; Date.now() < deadline; ) {
-        if (done) return true;
+        if (done) return false;
         try {
             const response = await fetch(url, {
                 signal: AbortSignal.timeout(5000),

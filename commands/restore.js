@@ -19,6 +19,7 @@ import {
 import {
     isEncrypted,
     passphraseFile,
+    removeLeftoverPassphrases,
     listBackups,
     readPassphrase,
     removePath,
@@ -78,6 +79,7 @@ export default class Restore {
             process.exitCode = 1;
             return;
         }
+        await removeLeftoverPassphrases();
 
         // exits via `process.exit` to release the lock, attached docker commands get the same Ctrl+C.
         for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']) {
@@ -137,6 +139,8 @@ export default class Restore {
                 (await this.#removeRemnants(volumes)) &&
                 (await this.#extractArchive(file, volumes, secret));
         } catch (error) {
+            // Ctrl+C at a prompt, handled in index.js.
+            if (error.name === 'ExitPromptError') throw error;
             console.log(chalk.red('❌ Could not restore:'), error.message);
         } finally {
             secret?.remove();
@@ -346,7 +350,8 @@ export default class Restore {
                 name: 'shouldDelete',
                 message:
                     'Appwrite remnants detected. Do you want to remove them for a clean installation?',
-                default: true,
+                // a restore replaces the install, so only on an explicit yes.
+                default: false,
             },
         ]);
         if (!shouldDelete) {
@@ -410,15 +415,15 @@ export default class Restore {
 
         const list = async (args) =>
             (await docker(args)).stdout.split('\n').filter(Boolean);
-        // volumes created by restores have no compose labels, so also every Appwrite volume by name.
+        // volumes created by restores have no compose labels, so also the ones the install & backup name.
+        // not every `appwrite_appwrite-*` volume, e.g. a manual copy of one.
+        const known = new Set([...(compose?.volumes ?? []), ...volumes]);
         const [containers, projectVolumes, allVolumes] = await Promise.all([
             list(['ps', '-a', '--filter', filter, '--format', '{{.Names}}']),
             list(['volume', 'ls', '--filter', filter, '--format', '{{.Name}}']),
             list(['volume', 'ls', '--format', '{{.Name}}']),
         ]);
-        const namedVolumes = allVolumes.filter((volume) =>
-            appwriteVolumeName.test(volume),
-        );
+        const namedVolumes = allVolumes.filter((volume) => known.has(volume));
 
         const volumeNames = [
             ...new Set([...projectVolumes, ...namedVolumes]),

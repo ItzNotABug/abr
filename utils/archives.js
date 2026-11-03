@@ -109,7 +109,8 @@ export async function selectBackup(files, message) {
         return null;
     }
 
-    const backups = files.map((file) => {
+    // newest first, a single Enter picks the latest backup.
+    const backups = [...files].reverse().map((file) => {
         const dateMatch = file.match(backupFilePattern);
         const lock = isEncrypted(file) ? ', encrypted' : '';
         if (!dateMatch) {
@@ -208,6 +209,27 @@ export function warnPartialArchives() {
             `⚠️  Found unfinished archives from interrupted backups in backups/, remove them unless one was reported complete: ${partials.join(', ')}.`,
         ),
     );
+}
+
+/**
+ * Removes passphrase files left in `backups/` by killed runs, they'd be copied along with the archives.
+ * Only call while holding the lock.
+ */
+export async function removeLeftoverPassphrases() {
+    const leftovers = fs.existsSync(backupsDir())
+        ? fs
+              .readdirSync(backupsDir())
+              .filter((name) => name.startsWith('.abr-passphrase-'))
+        : [];
+    for (const leftover of leftovers) {
+        if (!(await removePath(path.join(backupsDir(), leftover)))) {
+            console.log(
+                chalk.red(
+                    `❌ Could not remove "${leftover}" in backups/, it holds a backup passphrase. Remove it.`,
+                ),
+            );
+        }
+    }
 }
 
 /**

@@ -22,6 +22,7 @@ import {
     partialFile,
     passphraseFile,
     readPassphrase,
+    removeLeftoverPassphrases,
     removePath,
     removePathSync,
     warnPartialArchives,
@@ -84,6 +85,7 @@ export default class Backup {
         }
         await warnLeftoverSnapshots();
         warnPartialArchives();
+        await removeLeftoverPassphrases();
 
         const compose = await readBackupCompose();
         if (!compose) {
@@ -274,6 +276,8 @@ export default class Backup {
                 if (snapshot) removeMariaDBSnapshotSync(snapshot, archive);
                 else dockerSync(['rm', '-f', archive], { reject: false });
                 removePathSync(partialFile(file));
+                // offen's plain archive, if it couldn't read the passphrase.
+                removePathSync(partialFile(file).replace(/\.gpg$/, ''));
                 stack.command?.kill();
                 this.#warnAppwriteDown(stack);
                 const down = stack.stopped || stack.paused;
@@ -514,10 +518,13 @@ export default class Backup {
 
         // offen writes a plain archive when it can't read the passphrase, so never keep that as encrypted.
         if (passphrase && !fs.existsSync(partial)) {
-            await removePath(partial.replace(/\.gpg$/, ''));
+            const plain = partial.replace(/\.gpg$/, '');
+            const removed = await removePath(plain);
             console.log(
                 chalk.red(
-                    '❌ The archive was not encrypted, it was removed. Docker may not read files in backups/.',
+                    removed
+                        ? '❌ The archive was not encrypted, it was removed. Docker may not read files in backups/.'
+                        : `❌ The archive was not encrypted & could not be removed, remove "${plain}".`,
                 ),
             );
             process.exitCode = 1;

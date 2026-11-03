@@ -119,16 +119,30 @@ export default class Restore {
         );
         const passphrase =
             file && isEncrypted(file) ? await readPassphrase() : '';
-        const volumes =
-            file &&
-            passphrase !== null &&
-            (await this.#pullImages(file)) &&
-            (await this.#readArchive(file, passphrase));
-        if (
-            !volumes ||
-            !(await this.#removeRemnants(volumes)) ||
-            !(await this.#extractArchive(file, volumes, passphrase))
-        ) {
+        if (!file || passphrase === null) {
+            process.exitCode = 1;
+            return;
+        }
+
+        // one passphrase file for listing & extracting, removed however the restore ends.
+        let secret = null;
+        let restored = false;
+        try {
+            secret = passphrase ? passphraseFile(passphrase) : null;
+            const volumes =
+                (await this.#pullImages(file)) &&
+                (await this.#readArchive(file, secret));
+            restored =
+                Boolean(volumes) &&
+                (await this.#removeRemnants(volumes)) &&
+                (await this.#extractArchive(file, volumes, secret));
+        } catch (error) {
+            console.log(chalk.red('❌ Could not restore:'), error.message);
+        } finally {
+            secret?.remove();
+        }
+
+        if (!restored) {
             if (this.#phase === 'changing') {
                 console.log(
                     chalk.yellow(
@@ -147,10 +161,10 @@ export default class Restore {
     /**
      * Reads the whole archive, which also checks its compression & encryption.
      *
-     * @param passphrase decrypts the archive, if encrypted.
+     * @param secret from {@link passphraseFile}, for encrypted archives.
      * @returns {Promise<string[]|null>} the volumes in it, `null` with the reason printed if it's unusable.
      */
-    static async #readArchive(file, passphrase) {
+    static async #readArchive(file, secret) {
         loader.start(chalk.blue('Checking the backup...'));
 
         const volumes = new Set();
@@ -161,7 +175,6 @@ export default class Restore {
         // numeric owners, so a crafted user name can't look like the quoted name.
         const entry =
             /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s+"((?:[^"\\]|\\.)*)"(?: (?:->|link to) "(?:[^"\\]|\\.)*")?$/;
-        const secret = passphrase && passphraseFile(passphrase);
         try {
             // with the extractor's tar, which reads it the same way. streamed, archives can hold millions of files.
             const listing = docker(
@@ -228,8 +241,6 @@ export default class Restore {
                 error.stderr?.trim() || error.message,
             );
             return null;
-        } finally {
-            secret?.remove();
         }
 
         if (unexpected.size) {
@@ -385,11 +396,16 @@ export default class Restore {
         const project = compose?.project ?? 'appwrite';
         const filter = `label=com.docker.compose.project=${project}`;
         // reused only under the default project, restores bring the install back as `appwrite`.
+        // the default caches too, the current compose may predate them.
         const kept = (
             project !== 'appwrite'
                 ? []
-                : (compose?.excluded ??
-                  cacheVolumes.map((key) => `${project}_${key}`))
+                : [
+                      ...new Set([
+                          ...(compose?.excluded ?? []),
+                          ...cacheVolumes.map((key) => `${project}_${key}`),
+                      ]),
+                  ]
         ).filter((volume) => !volumes.includes(volume));
 
         const list = async (args) =>
@@ -438,7 +454,7 @@ export default class Restore {
     /**
      * Extracts the archive straight into the volumes & the `appwrite` folder, as root to keep file owners.
      */
-    static async #extractArchive(file, volumes, passphrase) {
+    static async #extractArchive(file, volumes, secret) {
         this.#phase = 'changing';
         loader.start(chalk.blue('Restoring volumes...'));
 
@@ -453,7 +469,6 @@ export default class Restore {
             process.getuid && !remapped
                 ? `${process.getuid()}:${process.getgid()}`
                 : '';
-        const secret = passphrase && passphraseFile(passphrase);
         try {
             // docker creates the missing `appwrite` folder, as root.
             await docker(
@@ -479,8 +494,6 @@ export default class Restore {
                 error.stderr?.trim() || error.message,
             );
             return false;
-        } finally {
-            secret?.remove();
         }
 
         console.log(chalk.green('✅ Restoration completed successfully.'));
@@ -504,7 +517,7 @@ export default class Restore {
             {
                 entrypoint: 'bash',
                 image: this.#extractor(file),
-                mounts: [...mounts, ...(secret ? [secret.mount] : [])],
+                mounts: [...mounts, ...(secret?.mount ? [secret.mount] : [])],
                 // escaped bytes for non-ASCII names in listings, whatever the image's locale.
                 env: [
                     'LANG=C',

@@ -71,10 +71,9 @@ export function startsAsOpenPGP(file) {
     } finally {
         fs.closeSync(fd);
     }
-    // a symmetric or public-key session key packet, in the old or new packet format.
-    return [
-        0x84, 0x85, 0x86, 0x87, 0xc1, 0x8c, 0x8d, 0x8e, 0x8f, 0xc3,
-    ].includes(header[0]);
+    // a symmetric-key session key packet, in the old or new packet format.
+    // only those: restores decrypt with a passphrase, not with a private key.
+    return [0x8c, 0x8d, 0x8e, 0x8f, 0xc3].includes(header[0]);
 }
 
 /**
@@ -82,14 +81,20 @@ export function startsAsOpenPGP(file) {
  */
 export function listBackups() {
     if (!fs.existsSync(backupsDir())) return [];
-    return fs
-        .readdirSync(backupsDir())
-        .filter(
-            (file) =>
-                file.startsWith('backup-') &&
-                extensions.some((extension) => file.endsWith(extension)),
-        )
-        .sort();
+    return (
+        fs
+            .readdirSync(backupsDir())
+            .filter(
+                (file) =>
+                    file.startsWith('backup-') &&
+                    extensions.some((extension) => file.endsWith(extension)),
+            )
+            // by name without extensions, `-1` collision suffixes sort before `.` otherwise.
+            .sort((a, b) => {
+                const base = (file) => file.replace(/\.tar\.gz(\.gpg)?$/, '');
+                return base(a).localeCompare(base(b), 'en');
+            })
+    );
 }
 
 /**
@@ -207,18 +212,38 @@ export function warnPartialArchives() {
 
 /**
  * Writes the passphrase to a file only this user can read, to mount into containers. As env, `docker inspect` would show it.
+ * In `backups/`, which containers reading or writing archives mount at `/archive` already: Docker may not see the temp folder.
+ * A temp folder, mounted itself, if `backups/` isn't writable, e.g. root-owned.
  *
- * @returns {{mount: string, path: string, remove: () => void}} `path` is the file inside the container.
+ * @returns {{path: string, mount: string|null, remove: () => void}} `path` is the file inside the container, `mount` extra.
  */
 export function passphraseFile(passphrase) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'abr-'));
+    let dir;
+    let mount = null;
+    let inside;
+    try {
+        dir = fs.mkdtempSync(path.join(backupsDir(), '.abr-passphrase-'));
+        inside = `/archive/${path.basename(dir)}`;
+    } catch {
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'abr-passphrase-'));
+        mount = `${dir}:/run/abr:ro`;
+        inside = '/run/abr';
+    }
+
     const remove = () => fs.rmSync(dir, { recursive: true, force: true });
     // also on a forced exit.
     process.once('exit', remove);
-    fs.writeFileSync(path.join(dir, 'passphrase'), passphrase, { mode: 0o600 });
+    try {
+        fs.writeFileSync(path.join(dir, 'passphrase'), passphrase, {
+            mode: 0o600,
+        });
+    } catch (error) {
+        remove();
+        throw error;
+    }
     return {
-        mount: `${dir}:/run/abr:ro`,
-        path: '/run/abr/passphrase',
+        path: `${inside}/passphrase`,
+        mount,
         remove: () => {
             process.off('exit', remove);
             remove();

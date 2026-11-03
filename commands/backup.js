@@ -481,7 +481,7 @@ export default class Backup {
                                 `${path.join(appwriteDir(), file)}:/backup/appwrite/${file}`,
                         ),
                         `${path.dirname(file)}:/archive`,
-                        ...(secret ? [secret.mount] : []),
+                        ...(secret?.mount ? [secret.mount] : []),
                     ],
                     // offen appends `.gpg` to encrypted archives.
                     env: [
@@ -510,6 +510,18 @@ export default class Backup {
             return false;
         } finally {
             secret?.remove();
+        }
+
+        // offen writes a plain archive when it can't read the passphrase, so never keep that as encrypted.
+        if (passphrase && !fs.existsSync(partial)) {
+            await removePath(partial.replace(/\.gpg$/, ''));
+            console.log(
+                chalk.red(
+                    '❌ The archive was not encrypted, it was removed. Docker may not read files in backups/.',
+                ),
+            );
+            process.exitCode = 1;
+            return false;
         }
 
         // a complete archive is still removed if the interrupt came first.

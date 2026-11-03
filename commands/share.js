@@ -16,7 +16,6 @@ import {
     selectBackup,
     startsAsOpenPGP,
 } from '../utils/archives.js';
-import { acquireLock, releaseLock } from '../utils/lock.js';
 import {
     curlCommand,
     newCredentials,
@@ -91,15 +90,13 @@ export default class Share {
             return;
         }
 
-        // held while hashing, not while picking or serving, so backups can run meanwhile.
+        // no lock: backups & restores never change existing archives.
         const file = await this.#selectEncryptedBackup();
-        const prepared =
-            file && (await acquireLock()) && (await this.#prepare(file));
+        const prepared = file && (await this.#prepare(file));
         if (!prepared) {
             process.exitCode = 1;
             return;
         }
-        releaseLock();
 
         const { token, probe, password, credentials } = newCredentials();
         const share = {
@@ -173,16 +170,21 @@ export default class Share {
         loader.start(chalk.blue('Preparing the share...'));
         try {
             await removeLeftoverTunnels();
+            // either failing stops the other, the process couldn't exit before.
             const controller = new AbortController();
-            const [sha256] = await Promise.all([
-                hashFile(file, controller.signal),
-                Promise.all([
-                    pullImages([helperImage]),
-                    refreshImage(tunnelImage),
-                ]).catch((error) => {
+            const stopOnFailure = (promise) =>
+                promise.catch((error) => {
                     controller.abort();
                     throw error;
-                }),
+                });
+            const [sha256] = await Promise.all([
+                stopOnFailure(hashFile(file, controller.signal)),
+                stopOnFailure(
+                    Promise.all([
+                        pullImages([helperImage], controller.signal),
+                        refreshImage(tunnelImage, controller.signal),
+                    ]),
+                ),
             ]);
             loader.stop();
             return { sha256, size: fs.statSync(file).size };
@@ -236,10 +238,21 @@ export default class Share {
                 );
             }
 
-            tunnel = interrupted ? null : startTunnel(port);
-            const url =
-                tunnel &&
-                (await Promise.race([tunnel.url, stopped.then(() => null)]));
+            // trycloudflare's API times out at times, a new tunnel usually gets through.
+            let url = null;
+            for (let attempt = 1; attempt <= 3 && !interrupted; attempt++) {
+                if (tunnel) await stopTunnel(tunnel);
+                tunnel = startTunnel(port);
+                try {
+                    url = await Promise.race([
+                        tunnel.url,
+                        stopped.then(() => null),
+                    ]);
+                    break;
+                } catch (error) {
+                    if (attempt === 3) throw error;
+                }
+            }
             loader.stop();
 
             if (url) {

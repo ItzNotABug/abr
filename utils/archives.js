@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import chalk from 'chalk';
+import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import inquirer from 'inquirer';
@@ -70,8 +71,10 @@ export function startsAsOpenPGP(file) {
     } finally {
         fs.closeSync(fd);
     }
-    // a symmetric-key session key packet, in the old or new packet format.
-    return [0x8c, 0x8d, 0x8e, 0x8f, 0xc3].includes(header[0]);
+    // a symmetric or public-key session key packet, in the old or new packet format.
+    return [
+        0x84, 0x85, 0x86, 0x87, 0xc1, 0x8c, 0x8d, 0x8e, 0x8f, 0xc3,
+    ].includes(header[0]);
 }
 
 /**
@@ -120,28 +123,20 @@ export async function selectBackup(files, message) {
 
     console.log('\n');
 
-    let selectedBackup;
+    // one choice, a multi-select would quietly use only one of several picks.
+    const { selectedBackup } = await inquirer.prompt([
+        {
+            type: 'select',
+            name: 'selectedBackup',
+            message,
+            choices: backups.map((b) => ({
+                name: `${b.name} (${b.displayDate})`,
+                value: b.name,
+            })),
+        },
+    ]);
 
-    while (!selectedBackup || selectedBackup.length === 0) {
-        const response = await inquirer.prompt([
-            {
-                type: 'checkbox',
-                name: 'selectedBackup',
-                message,
-                choices: backups.map((b) => ({
-                    name: `${b.name} (${b.displayDate})`,
-                    value: b.name,
-                })),
-                validate: (input) =>
-                    input.length > 0 ||
-                    'Please select at least one backup file.',
-            },
-        ]);
-
-        selectedBackup = response.selectedBackup;
-    }
-
-    return path.join(backupsDir(), selectedBackup[0]);
+    return path.join(backupsDir(), selectedBackup);
 }
 
 /**
@@ -208,6 +203,27 @@ export function warnPartialArchives() {
             `⚠️  Found unfinished archives from interrupted backups in backups/, remove them unless one was reported complete: ${partials.join(', ')}.`,
         ),
     );
+}
+
+/**
+ * Writes the passphrase to a file only this user can read, to mount into containers. As env, `docker inspect` would show it.
+ *
+ * @returns {{mount: string, path: string, remove: () => void}} `path` is the file inside the container.
+ */
+export function passphraseFile(passphrase) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'abr-'));
+    const remove = () => fs.rmSync(dir, { recursive: true, force: true });
+    // also on a forced exit.
+    process.once('exit', remove);
+    fs.writeFileSync(path.join(dir, 'passphrase'), passphrase, { mode: 0o600 });
+    return {
+        mount: `${dir}:/run/abr:ro`,
+        path: '/run/abr/passphrase',
+        remove: () => {
+            process.off('exit', remove);
+            remove();
+        },
+    };
 }
 
 /**

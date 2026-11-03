@@ -1,5 +1,10 @@
 import chalk from 'chalk';
-import { appwriteDir, docker } from './misc.js';
+import {
+    appwriteDir,
+    appwriteVolumeName,
+    docker,
+    mariadbVolume,
+} from './misc.js';
 
 /**
  * Compose keys of volumes that aren't backed up, as they hold re-downloadable caches.
@@ -10,8 +15,8 @@ export const cacheVolumes = ['appwrite-models'];
 /**
  * Reads the Appwrite install's compose config, resolved by compose itself: `.env`, shell overrides, quoting & comments.
  *
- * @returns {Promise<{project: string, adapter: string, mariadb: {container: string, volume: string|undefined}|null, volumes: string[], excluded: string[]}>}
- * `volumes` are the project's volumes to back up, `excluded` the caches, which aren't.
+ * @returns {Promise<{project: string, adapter: string, mariadb: {container: string, volume: string|undefined}|null, volumes: string[], excluded: string[], others: string[]}>}
+ * `volumes` are Appwrite's volumes to back up, `excluded` its caches & `others` volumes added to the install, neither backed up.
  * @throws when compose fails or prints something unexpected.
  */
 export async function readCompose() {
@@ -21,10 +26,13 @@ export async function readCompose() {
     const config = JSON.parse(stdout);
     const services = Object.entries(config.services);
     const volumes = Object.entries(config.volumes ?? {});
+    const named = volumes.map(([key, volume]) => [key, volume.name ?? key]);
+    // restores only accept Appwrite's own volume names, others would make a backup unrestorable.
+    const own = named.filter(([, name]) => appwriteVolumeName.test(name));
     const names = (excluded) =>
-        volumes
+        own
             .filter(([key]) => cacheVolumes.includes(key) === excluded)
-            .map(([key, volume]) => volume.name ?? key);
+            .map(([, name]) => name);
 
     const [key, service] =
         services.find(([, service]) =>
@@ -51,6 +59,9 @@ export async function readCompose() {
             : null,
         volumes: names(false),
         excluded: names(true),
+        others: named
+            .filter(([, name]) => !appwriteVolumeName.test(name))
+            .map(([, name]) => name),
     };
 }
 
@@ -88,14 +99,22 @@ export async function readBackupCompose() {
         return null;
     }
 
-    // e.g. a bind mount, which wouldn't be in the backup.
-    if (!compose.volumes.includes(compose.mariadb?.volume)) {
+    // e.g. a bind mount or a renamed volume, which restores wouldn't bring back.
+    if (compose.mariadb?.volume !== mariadbVolume) {
         console.error(
             chalk.red(
-                `❌ Unsupported MariaDB data volume: ${compose.mariadb?.volume ?? 'none'}. Expected one of the install's compose volumes.`,
+                `❌ Unsupported MariaDB data volume: ${compose.mariadb?.volume ?? 'none'}. Expected "${mariadbVolume}".`,
             ),
         );
         return null;
+    }
+
+    if (compose.others.length) {
+        console.log(
+            chalk.yellow(
+                `⚠️  Not backed up, these volumes aren't Appwrite's own: ${compose.others.join(', ')}.`,
+            ),
+        );
     }
 
     return compose;

@@ -17,8 +17,12 @@ export const tunnelImage = 'cloudflare/cloudflared:latest';
 /**
  * Pulls the latest image, Cloudflare drops support for old cloudflared releases. Offline, a present one is used.
  */
-export async function refreshImage(image) {
-    const { failed, stderr } = await docker(['pull', image], { reject: false });
+export async function refreshImage(image, signal) {
+    const { failed, stderr } = await docker(['pull', image], {
+        reject: false,
+        cancelSignal: signal,
+    });
+    signal?.throwIfAborted();
     if (!failed) return;
     const present = await docker(['image', 'inspect', image], {
         reject: false,

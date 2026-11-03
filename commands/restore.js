@@ -7,16 +7,18 @@ import loading from 'loading-cli';
 import {
     appwriteDir,
     checkDocker,
-    defaultVolumes,
+    appwriteVolumeName,
     docker,
     helperArgs,
     installFiles,
+    mariadbVolume,
     pullImages,
     restartAppwriteStack,
     signalExitCode,
 } from '../utils/misc.js';
 import {
     isEncrypted,
+    passphraseFile,
     listBackups,
     readPassphrase,
     removePath,
@@ -24,7 +26,6 @@ import {
 } from '../utils/archives.js';
 import { cacheVolumes, readCompose } from '../utils/compose.js';
 import { acquireLock } from '../utils/lock.js';
-import { existingVolumes } from '../utils/volumes.js';
 
 const loader = loading('');
 
@@ -34,24 +35,19 @@ const loader = loading('');
 const extractorImage = 'debian:stable-slim';
 
 /**
- * MariaDB's volume in supported installs, a backup without it can't be restored.
- */
-const mariadbVolume = 'appwrite_appwrite-mariadb';
-
-/**
  * Extracts encrypted archives, the extractor's GNU tar plus GPG.
  */
 const decryptorImage = 'buildpack-deps:stable-curl';
 
 /**
- * Shell function writing the archive `/archive/$1` to stdout, decrypted via `$ABR_GPG_PASSPHRASE` if encrypted.
+ * Shell function writing the archive `/archive/$1` to stdout, decrypted via `$ABR_GPG_PASSPHRASE_FILE` if encrypted.
  * A wrong passphrase or a tampered archive fails it, after the data was read: callers need `pipefail`.
  */
 const archiveReader = [
     'set -o pipefail',
     'archive() {',
     '  case "$1" in',
-    '    *.gpg) printf %s "$ABR_GPG_PASSPHRASE" | gpg --batch --quiet --no-symkey-cache --pinentry-mode loopback --passphrase-fd 0 --decrypt "/archive/$1" ;;',
+    '    *.gpg) gpg --batch --quiet --no-symkey-cache --pinentry-mode loopback --passphrase-file "$ABR_GPG_PASSPHRASE_FILE" --decrypt "/archive/$1" ;;',
     '    *) cat "/archive/$1" ;;',
     '  esac',
     '}',
@@ -160,24 +156,22 @@ export default class Restore {
         const volumes = new Set();
         const appwriteFiles = new Set();
         const unexpected = new Set();
-        // names become `docker run -v` sources & are removed first, so only the supported project's volumes.
-        const volumeName = /^appwrite_appwrite-[a-z0-9-]+$/;
+        // names become `docker run -v` sources & are removed first, so only Appwrite's own volumes.
         // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
         // numeric owners, so a crafted user name can't look like the quoted name.
         const entry =
             /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s+"((?:[^"\\]|\\.)*)"(?: (?:->|link to) "(?:[^"\\]|\\.)*")?$/;
+        const secret = passphrase && passphraseFile(passphrase);
         try {
             // with the extractor's tar, which reads it the same way. streamed, archives can hold millions of files.
             const listing = docker(
                 this.#archiveScriptArgs(
                     file,
                     [`${path.dirname(file)}:/archive:ro`],
+                    secret,
                     'archive "$1" | tar -tvzP --quoting-style=c --numeric-owner -f -',
                 ),
-                {
-                    buffer: { stdout: false },
-                    env: { ABR_GPG_PASSPHRASE: passphrase },
-                },
+                { buffer: { stdout: false } },
             );
             for await (const line of listing) {
                 const [, type, quoted] = line.match(entry) ?? [];
@@ -212,7 +206,7 @@ export default class Restore {
                     } else {
                         unexpected.add(name);
                     }
-                } else if (volumeName.test(dir)) {
+                } else if (appwriteVolumeName.test(dir)) {
                     volumes.add(dir);
                 } else {
                     unexpected.add(`backup/${dir}`);
@@ -234,6 +228,8 @@ export default class Restore {
                 error.stderr?.trim() || error.message,
             );
             return null;
+        } finally {
+            secret?.remove();
         }
 
         if (unexpected.size) {
@@ -398,12 +394,15 @@ export default class Restore {
 
         const list = async (args) =>
             (await docker(args)).stdout.split('\n').filter(Boolean);
-        // volumes created by restores have no compose labels, so also by name.
-        const [containers, projectVolumes, namedVolumes] = await Promise.all([
+        // volumes created by restores have no compose labels, so also every Appwrite volume by name.
+        const [containers, projectVolumes, allVolumes] = await Promise.all([
             list(['ps', '-a', '--filter', filter, '--format', '{{.Names}}']),
             list(['volume', 'ls', '--filter', filter, '--format', '{{.Name}}']),
-            existingVolumes([...new Set([...defaultVolumes, ...volumes])]),
+            list(['volume', 'ls', '--format', '{{.Name}}']),
         ]);
+        const namedVolumes = allVolumes.filter((volume) =>
+            appwriteVolumeName.test(volume),
+        );
 
         const volumeNames = [
             ...new Set([...projectVolumes, ...namedVolumes]),
@@ -454,6 +453,7 @@ export default class Restore {
             process.getuid && !remapped
                 ? `${process.getuid()}:${process.getgid()}`
                 : '';
+        const secret = passphrase && passphraseFile(passphrase);
         try {
             // docker creates the missing `appwrite` folder, as root.
             await docker(
@@ -466,10 +466,10 @@ export default class Restore {
                         `${appwriteDir()}:/restore/backup/appwrite`,
                         `${path.dirname(file)}:/archive:ro`,
                     ],
+                    secret,
                     'archive "$1" | tar -xz -f - -C /restore --numeric-owner && if [ -n "$2" ]; then chown -R "$2" /restore/backup/appwrite; fi',
                     owner,
                 ),
-                { env: { ABR_GPG_PASSPHRASE: passphrase } },
             );
             loader.stop();
         } catch (error) {
@@ -479,6 +479,8 @@ export default class Restore {
                 error.stderr?.trim() || error.message,
             );
             return false;
+        } finally {
+            secret?.remove();
         }
 
         console.log(chalk.green('✅ Restoration completed successfully.'));
@@ -494,16 +496,22 @@ export default class Restore {
 
     /**
      * `docker run` arguments for a `script` reading the archive via `archive "$1"`, other `args` follow as `$2`...
-     * The passphrase is passed via env, not argv, to keep it out of `ps`.
+     *
+     * @param secret from {@link passphraseFile}, for encrypted archives.
      */
-    static #archiveScriptArgs(file, mounts, script, ...args) {
+    static #archiveScriptArgs(file, mounts, secret, script, ...args) {
         return helperArgs(
             {
                 entrypoint: 'bash',
                 image: this.#extractor(file),
-                mounts,
+                mounts: [...mounts, ...(secret ? [secret.mount] : [])],
                 // escaped bytes for non-ASCII names in listings, whatever the image's locale.
-                env: ['ABR_GPG_PASSPHRASE', 'LANG=C'],
+                env: [
+                    'LANG=C',
+                    ...(secret
+                        ? [`ABR_GPG_PASSPHRASE_FILE=${secret.path}`]
+                        : []),
+                ],
             },
             '-c',
             `${archiveReader}\n${script}`,

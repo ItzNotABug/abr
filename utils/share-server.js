@@ -33,8 +33,13 @@ export async function startServer(share, log) {
     );
     await new Promise((resolve, reject) => {
         server.once('error', reject);
-        server.listen(0, '127.0.0.1', resolve);
+        server.listen(0, '127.0.0.1', () => {
+            server.off('error', reject);
+            resolve();
+        });
     });
+    // e.g. EMFILE while accepting, unhandled it would crash the share without cleanup.
+    server.on('error', (error) => log(`server error: ${error.message}`));
     return server;
 }
 

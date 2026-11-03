@@ -20,6 +20,7 @@ import {
     movePath,
     newBackupFile,
     partialFile,
+    passphraseFile,
     readPassphrase,
     removePath,
     removePathSync,
@@ -460,9 +461,11 @@ export default class Backup {
     }) {
         // a truncated archive would be listed by restore, so it's only moved to its final name once complete.
         const partial = partialFile(file);
+        let secret = null;
 
         try {
             loader.start('Starting backup process...');
+            secret = passphrase && passphraseFile(passphrase);
             await docker(
                 helperArgs({
                     entrypoint: 'backup',
@@ -478,17 +481,17 @@ export default class Backup {
                                 `${path.join(appwriteDir(), file)}:/backup/appwrite/${file}`,
                         ),
                         `${path.dirname(file)}:/archive`,
+                        ...(secret ? [secret.mount] : []),
                     ],
-                    // offen appends `.gpg` to encrypted archives. the passphrase via env, not argv, to keep it out of `ps`.
+                    // offen appends `.gpg` to encrypted archives.
                     env: [
                         `BACKUP_FILENAME=${path.basename(partial).replace(/\.gpg$/, '')}`,
-                        ...(passphrase ? ['GPG_PASSPHRASE'] : []),
+                        ...(secret
+                            ? [`GPG_PASSPHRASE_FILE=${secret.path}`]
+                            : []),
                     ],
                 }),
-                {
-                    cancelSignal: signal,
-                    env: passphrase ? { GPG_PASSPHRASE: passphrase } : {},
-                },
+                { cancelSignal: signal },
             );
             loader.stop();
         } catch (error) {
@@ -505,6 +508,8 @@ export default class Backup {
             );
             process.exitCode = 1;
             return false;
+        } finally {
+            secret?.remove();
         }
 
         // a complete archive is still removed if the interrupt came first.

@@ -23,22 +23,14 @@ ${chalk.blue('_'.repeat(146))}
 `;
 
 /**
- * Volume names of default Appwrite installs, past & present.
- * Backups take the install's own volumes from its compose config, restores use these to find unlabelled volumes left by earlier restores.
+ * Names of Appwrite's own volumes under the default project, the only ones backups take & restores accept.
  */
-export const defaultVolumes = [
-    'appwrite_appwrite-redis',
-    'appwrite_appwrite-cache',
-    'appwrite_appwrite-builds',
-    'appwrite_appwrite-config',
-    'appwrite_appwrite-executor',
-    'appwrite_appwrite-mariadb',
-    'appwrite_appwrite-uploads',
-    'appwrite_appwrite-functions',
-    'appwrite_appwrite-certificates',
-    'appwrite_appwrite-sites',
-    'appwrite_appwrite-imports',
-];
+export const appwriteVolumeName = /^appwrite_appwrite-[a-z0-9-]+$/;
+
+/**
+ * MariaDB's volume in supported installs.
+ */
+export const mariadbVolume = 'appwrite_appwrite-mariadb';
 
 /**
  * Install files archived with the volumes, from the `appwrite` folder.
@@ -106,7 +98,7 @@ let detached = false;
  * While ABR handles interrupts itself, docker commands run in their own process group,
  * so a Ctrl+C reaches only ABR, which then stops or finishes them. Otherwise it stops them too.
  */
-export function setHandlingInterrupts(handling) {
+function setHandlingInterrupts(handling) {
     detached = handling;
 }
 
@@ -147,12 +139,12 @@ export function dockerSync(args, options = {}) {
 /**
  * Pulls the images that aren't present yet. Throws on failure.
  */
-export async function pullImages(images) {
+export async function pullImages(images, signal) {
     for (const image of images) {
         const { failed } = await docker(['image', 'inspect', image], {
             reject: false,
         });
-        if (failed) await docker(['pull', image]);
+        if (failed) await docker(['pull', image], { cancelSignal: signal });
     }
 }
 

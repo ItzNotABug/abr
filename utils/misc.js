@@ -23,9 +23,10 @@ ${chalk.blue('_'.repeat(146))}
 `;
 
 /**
- * Appwrite docker volumes.
+ * Volume names of default Appwrite installs, past & present.
+ * Backups take the install's own volumes from its compose config, restores use these to find unlabelled volumes left by earlier restores.
  */
-export const appwriteVolumes = [
+export const defaultVolumes = [
     'appwrite_appwrite-redis',
     'appwrite_appwrite-cache',
     'appwrite_appwrite-builds',
@@ -35,6 +36,8 @@ export const appwriteVolumes = [
     'appwrite_appwrite-uploads',
     'appwrite_appwrite-functions',
     'appwrite_appwrite-certificates',
+    'appwrite_appwrite-sites',
+    'appwrite_appwrite-imports',
 ];
 
 /**
@@ -107,6 +110,29 @@ export function setHandlingInterrupts(handling) {
     detached = handling;
 }
 
+/**
+ * Routes interrupts to `onInterrupt(signal)` until the returned `release` is called.
+ * Meanwhile docker commands run detached & write errors of a hung up terminal are ignored.
+ */
+export function handleInterrupts(onInterrupt) {
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
+    // `on`, not `once`: execa's exit hook re-raises the signal if no other listener is left.
+    signals.forEach((name) => process.on(name, onInterrupt));
+    setHandlingInterrupts(true);
+
+    // a hung up terminal (SIGHUP) fails writes with EIO, don't crash before the cleanup.
+    const ignore = () => {};
+    process.stdout.on('error', ignore);
+    process.stderr.on('error', ignore);
+
+    return () => {
+        setHandlingInterrupts(false);
+        signals.forEach((name) => process.off(name, onInterrupt));
+        process.stdout.off('error', ignore);
+        process.stderr.off('error', ignore);
+    };
+}
+
 export function docker(args, options = {}) {
     return execa('docker', args, { detached, ...options });
 }
@@ -118,12 +144,37 @@ export function dockerSync(args, options = {}) {
     return execaSync('docker', args, options);
 }
 
+/**
+ * Pulls the images that aren't present yet. Throws on failure.
+ */
+export async function pullImages(images) {
+    for (const image of images) {
+        const { failed } = await docker(['image', 'inspect', image], {
+            reject: false,
+        });
+        if (failed) await docker(['pull', image]);
+    }
+}
+
 export function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function sleepSync(ms) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Whether a process with this pid exists.
+ */
+export function isRunning(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (error) {
+        // exists, but owned by another user, e.g. a `sudo` run.
+        return error.code === 'EPERM';
+    }
 }
 
 /**

@@ -7,6 +7,8 @@ import chalk from 'chalk';
  */
 const lockPort = 31991;
 
+let held = null;
+
 /**
  * Takes the lock against concurrent ABR runs on this host, released on exit.
  * Host-wide, as supported installations share the same container & volume names.
@@ -32,8 +34,17 @@ export function acquireLock() {
             { port: lockPort, host: '127.0.0.1', exclusive: true },
             () => {
                 server.unref();
+                held = server;
                 resolve(true);
             },
         );
     });
+}
+
+/**
+ * Releases the lock before exit, e.g. once a long running command is past the part it guards.
+ */
+export function releaseLock() {
+    held?.close();
+    held = null;
 }

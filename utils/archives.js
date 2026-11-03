@@ -1,6 +1,9 @@
 import * as fs from 'fs';
 import chalk from 'chalk';
 import * as path from 'path';
+import * as crypto from 'crypto';
+import inquirer from 'inquirer';
+import { pipeline } from 'stream/promises';
 import { docker, dockerSync, helperArgs } from './misc.js';
 
 /**
@@ -14,23 +17,171 @@ export function backupsDir() {
 }
 
 /**
+ * Extensions of backup archives, plain & encrypted via GPG.
+ */
+const extensions = ['.tar.gz', '.tar.gz.gpg'];
+
+export function isEncrypted(file) {
+    return file.endsWith('.gpg');
+}
+
+/**
  * Returns an unused path for a new backup archive.
  */
-export function newBackupFile() {
+export function newBackupFile(encrypted = false) {
     // created by ABR, `docker run -v` would create it as root.
     fs.mkdirSync(backupsDir(), { recursive: true });
     const timestamp = new Date()
         .toISOString()
         .slice(0, 19)
         .replaceAll(':', '-');
-    const name = (suffix) =>
-        path.join(backupsDir(), `backup-${timestamp}${suffix}.tar.gz`);
-    const taken = (file) =>
-        fs.existsSync(file) || fs.existsSync(partialFile(file));
+    const name = (suffix, extension) =>
+        path.join(backupsDir(), `backup-${timestamp}${suffix}${extension}`);
+    // a name is taken by either extension, so plain & encrypted backups never share one.
+    const taken = (suffix) =>
+        extensions.some((extension) => {
+            const file = name(suffix, extension);
+            return fs.existsSync(file) || fs.existsSync(partialFile(file));
+        });
 
-    let file = name('');
-    for (let i = 1; taken(file); i++) file = name(`-${i}`);
-    return file;
+    let suffix = '';
+    for (let i = 1; taken(suffix); i++) suffix = `-${i}`;
+    return name(suffix, extensions[encrypted ? 1 : 0]);
+}
+
+/**
+ * The file's SHA-256, in hex.
+ */
+export async function hashFile(file, signal) {
+    const hash = crypto.createHash('sha256');
+    await pipeline(fs.createReadStream(file), hash, { signal });
+    return hash.digest('hex');
+}
+
+/**
+ * Whether the file starts like a passphrase encrypted OpenPGP message, as GPG archives do.
+ * A renamed plain archive starts with gzip's header instead.
+ */
+export function startsAsOpenPGP(file) {
+    const header = Buffer.alloc(1);
+    const fd = fs.openSync(file, 'r');
+    try {
+        fs.readSync(fd, header, 0, 1, 0);
+    } finally {
+        fs.closeSync(fd);
+    }
+    // a symmetric-key session key packet, in the old or new packet format.
+    return [0x8c, 0x8d, 0x8e, 0x8f, 0xc3].includes(header[0]);
+}
+
+/**
+ * The backup archives in `backups/`, by name, so oldest first.
+ */
+export function listBackups() {
+    if (!fs.existsSync(backupsDir())) return [];
+    return fs
+        .readdirSync(backupsDir())
+        .filter(
+            (file) =>
+                file.startsWith('backup-') &&
+                extensions.some((extension) => file.endsWith(extension)),
+        )
+        .sort();
+}
+
+/**
+ * Asks for one of the given backups.
+ *
+ * @param files backup names, from {@link listBackups}.
+ * @returns {Promise<string|null>} its path, `null` if there are none.
+ */
+export async function selectBackup(files, message) {
+    if (files.length === 0) {
+        console.log(chalk.red('❌ No backup files found.'));
+        return null;
+    }
+
+    const backups = files.map((file) => {
+        const dateMatch = file.match(backupFilePattern);
+        const lock = isEncrypted(file) ? ', encrypted' : '';
+        if (!dateMatch) {
+            return { name: file, displayDate: `Unknown${lock}` };
+        }
+
+        const [, year, month, day, hour, minute] = dateMatch;
+
+        const hourInt = parseInt(hour, 10);
+        const period = hourInt >= 12 ? 'PM' : 'AM';
+        const formattedHour = ((hourInt + 11) % 12) + 1; // Convert to 12-hour format
+        const formattedDate = `${day}/${month}/${year} @ ${formattedHour}:${minute} ${period}`;
+
+        return { name: file, displayDate: `${formattedDate}${lock}` };
+    });
+
+    console.log('\n');
+
+    let selectedBackup;
+
+    while (!selectedBackup || selectedBackup.length === 0) {
+        const response = await inquirer.prompt([
+            {
+                type: 'checkbox',
+                name: 'selectedBackup',
+                message,
+                choices: backups.map((b) => ({
+                    name: `${b.name} (${b.displayDate})`,
+                    value: b.name,
+                })),
+                validate: (input) =>
+                    input.length > 0 ||
+                    'Please select at least one backup file.',
+            },
+        ]);
+
+        selectedBackup = response.selectedBackup;
+    }
+
+    return path.join(backupsDir(), selectedBackup[0]);
+}
+
+/**
+ * The passphrase of encrypted backups, from `ABR_GPG_PASSPHRASE` or a prompt.
+ * Single line only, GPG reads passphrases up to the first line break.
+ *
+ * @param confirm asks twice, for new backups.
+ * @returns {Promise<string|null>} `null` with the reason printed if the variable is unusable.
+ */
+export async function readPassphrase(confirm = false) {
+    const variable = process.env.ABR_GPG_PASSPHRASE;
+    if (variable && /[\r\n]/.test(variable)) {
+        console.log(
+            chalk.red('❌ ABR_GPG_PASSPHRASE must not contain line breaks.'),
+        );
+        return null;
+    }
+    if (variable) return variable;
+
+    const ask = async (message) =>
+        (
+            await inquirer.prompt([
+                {
+                    type: 'password',
+                    name: 'passphrase',
+                    message,
+                    mask: '*',
+                    validate: (input) =>
+                        input.length > 0 || 'The passphrase cannot be empty.',
+                },
+            ])
+        ).passphrase;
+
+    for (;;) {
+        const passphrase = await ask('Enter the backup passphrase:');
+        if (!confirm || (await ask('Repeat the passphrase:')) === passphrase) {
+            return passphrase;
+        }
+        console.log(chalk.yellow('⚠️  The passphrases do not match.'));
+    }
 }
 
 /**

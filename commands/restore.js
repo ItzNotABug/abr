@@ -440,8 +440,10 @@ export default class Restore {
         // only Appwrite's own: other volumes of the project aren't backed up, removing them would lose them.
         const volumeNames = [
             ...new Set([
-                ...projectVolumes.filter((volume) =>
-                    appwriteVolumeName.test(volume),
+                ...projectVolumes.filter(
+                    (volume) =>
+                        appwriteVolumeName.test(volume) ||
+                        volume.startsWith(`${project}_appwrite-`),
                 ),
                 ...namedVolumes,
             ]),

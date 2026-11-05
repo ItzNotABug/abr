@@ -258,8 +258,9 @@ footer { margin-top: 1.75rem; padding-top: 1rem; border-top: 1px solid var(--lin
  * Shows the expiry in the visitor's time & swaps the download for a notice once it passed. Copies commands.
  */
 const script = `
+// from the time left when served, the visitor's clock may be off.
 const time = document.querySelector('time');
-const deadline = new Date(time.dateTime);
+const deadline = new Date(Date.now() + Number(time.dataset.left));
 const at = deadline.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const tick = () => {
     const minutes = Math.ceil((deadline - Date.now()) / 60000);
@@ -341,7 +342,7 @@ function page(share) {
 <dl>
 <dt>File</dt><dd><code>${name}</code></dd>
 <dt>Size</dt><dd>${escape(formatSize(share.size / 1024))}</dd>
-<dt>Expires</dt><dd><time datetime="${deadline.toISOString()}">${escape(deadline.toUTCString())}</time></dd>
+<dt>Expires</dt><dd><time datetime="${deadline.toISOString()}" data-left="${Math.max(0, share.deadline - Date.now())}">${escape(deadline.toUTCString())}</time></dd>
 <dt>SHA-256</dt><dd><code>${share.sha256}</code></dd>
 </dl>
 <a class="download" href="${escape(encodeURIComponent(share.name))}" download>Download backup</a>

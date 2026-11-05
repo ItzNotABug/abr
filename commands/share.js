@@ -286,8 +286,9 @@ export default class Share {
             share.done = true;
             clearInterval(timer);
             clearStatus();
-            if (tunnel) await stopTunnel(tunnel);
+            // the server first, cloudflared waits for open requests otherwise.
             if (server) stopServer(server);
+            if (tunnel) await stopTunnel(tunnel);
         }
 
         // before the release, which stops ignoring write errors of a hung up terminal.
@@ -430,15 +431,18 @@ async function reachesPublicly(url, ended) {
     ended.then(() => (done = true));
     for (const deadline = Date.now() + 60_000; Date.now() < deadline; ) {
         if (done) return false;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        ended.then(() => controller.abort());
         try {
-            const response = await fetch(url, {
-                signal: AbortSignal.timeout(5000),
-            });
+            const response = await fetch(url, { signal: controller.signal });
             // read, an unread body keeps its connection.
             await response.body?.cancel();
             if (response.ok) return true;
         } catch {
             // not resolvable or reachable yet.
+        } finally {
+            clearTimeout(timeout);
         }
         await Promise.race([wait(2000), ended]);
     }

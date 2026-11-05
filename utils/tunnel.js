@@ -6,13 +6,8 @@ import * as fs from 'fs';
 let cloudflared;
 
 /**
- * Cloudflare drops support for cloudflared releases after about a year, so older binaries are replaced.
- */
-const maxBinaryAge = 180 * 24 * 60 * 60 * 1000;
-
-/**
- * Installs the cloudflared binary if it's missing or old, the npm package installs it on `npm install` otherwise.
- * An old one is kept if the update fails, e.g. on a root-owned global install.
+ * Loads the cloudflared package & installs its binary if missing, e.g. installed with scripts disabled.
+ * The package fetches the latest binary on install, so updating ABR updates cloudflared.
  */
 export async function prepareCloudflared() {
     try {
@@ -22,15 +17,8 @@ export async function prepareCloudflared() {
             'the cloudflared package is missing, reinstall ABR. It may not support this platform.',
         );
     }
-    const { bin, install } = cloudflared;
-    const present = fs.existsSync(bin);
-    if (present && Date.now() - fs.statSync(bin).mtimeMs <= maxBinaryAge) {
-        return;
-    }
-    try {
-        await install(bin);
-    } catch (error) {
-        if (!present) throw error;
+    if (!fs.existsSync(cloudflared.bin)) {
+        await cloudflared.install(cloudflared.bin);
     }
 }
 
@@ -60,7 +48,7 @@ export function startTunnel(port) {
             resolve();
         };
         quick.once('exit', exited);
-        quick.once('error', (error) => {
+        quick.on('error', (error) => {
             output.push(error.message);
             exited();
         });

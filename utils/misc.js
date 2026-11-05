@@ -139,12 +139,12 @@ export function dockerSync(args, options = {}) {
 /**
  * Pulls the images that aren't present yet. Throws on failure.
  */
-export async function pullImages(images, signal) {
+export async function pullImages(images) {
     for (const image of images) {
         const { failed } = await docker(['image', 'inspect', image], {
             reject: false,
         });
-        if (failed) await docker(['pull', image], { cancelSignal: signal });
+        if (failed) await docker(['pull', image]);
     }
 }
 

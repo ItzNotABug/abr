@@ -147,7 +147,7 @@ export default class Share {
     }
 
     /**
-     * Pulls the images & hashes the file.
+     * Prepares cloudflared & hashes the file.
      *
      * @returns {Promise<{sha256: string, size: number}|null>} `null` with the reason printed on failure.
      */
@@ -237,7 +237,6 @@ export default class Share {
                 } catch (error) {
                     url = null;
                     if (attempt === attempts) {
-                        error.message += '';
                         throw error;
                     }
                     continue;

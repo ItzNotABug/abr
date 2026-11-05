@@ -1,5 +1,9 @@
 import * as fs from 'fs';
-import { bin, install, Tunnel } from 'cloudflared';
+
+/**
+ * The cloudflared package, an optional dependency: loaded on first share, so backups & restores work without it.
+ */
+let cloudflared;
 
 /**
  * Cloudflare drops support for cloudflared releases after about a year, so older binaries are replaced.
@@ -8,58 +12,90 @@ const maxBinaryAge = 180 * 24 * 60 * 60 * 1000;
 
 /**
  * Installs the cloudflared binary if it's missing or old, the npm package installs it on `npm install` otherwise.
+ * An old one is kept if the update fails, e.g. on a root-owned global install.
  */
 export async function prepareCloudflared() {
-    const stale =
-        !fs.existsSync(bin) ||
-        Date.now() - fs.statSync(bin).mtimeMs > maxBinaryAge;
-    if (stale) await install(bin);
+    try {
+        cloudflared ??= await import('cloudflared');
+    } catch {
+        throw new Error(
+            'the cloudflared package is missing, reinstall ABR. It may not support this platform.',
+        );
+    }
+    const { bin, install } = cloudflared;
+    const present = fs.existsSync(bin);
+    if (present && Date.now() - fs.statSync(bin).mtimeMs <= maxBinaryAge) {
+        return;
+    }
+    try {
+        await install(bin);
+    } catch (error) {
+        if (!present) throw error;
+    }
 }
 
 /**
  * Starts a Cloudflare Quick Tunnel to `http://127.0.0.1:<port>`, which needs no account or domain.
+ * Only after {@link prepareCloudflared}.
  *
  * @returns {{url: Promise<string>, exited: Promise<void>, done: boolean, stop: () => void}}
  * `url` resolves once Cloudflare is connected, rejects if the tunnel exits first or takes over a minute.
  */
 export function startTunnel(port) {
-    const cloudflared = Tunnel.quick(`http://127.0.0.1:${port}`, {
+    const quick = cloudflared.Tunnel.quick(`http://127.0.0.1:${port}`, {
         '--no-autoupdate': true,
         // TCP, QUIC's UDP is often blocked by firewalls.
         '--protocol': 'http2',
     });
 
-    const tunnel = { done: false, stop: () => cloudflared.stop() };
+    const output = [];
+    const tunnel = { done: false, stop: () => quick.stop() };
     // a child process outlives ABR otherwise, keeping the link up.
     process.once('exit', tunnel.stop);
-    tunnel.exited = new Promise((resolve) =>
-        cloudflared.once('exit', () => {
+    // a failed start, e.g. a broken binary, may emit `error` without `exit`.
+    tunnel.exited = new Promise((resolve) => {
+        const exited = () => {
             tunnel.done = true;
             process.off('exit', tunnel.stop);
             resolve();
-        }),
-    );
+        };
+        quick.once('exit', exited);
+        quick.once('error', (error) => {
+            output.push(error.message);
+            exited();
+        });
+    });
 
-    // the URL is printed before Cloudflare accepts connections for it.
-    const output = [];
-    cloudflared.on('stderr', (line) => output.push(line));
+    // the last lines, to explain a failure.
+    quick.on('stderr', (line) => {
+        output.push(line);
+        output.splice(0, output.length - 5);
+    });
     tunnel.url = new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
-            cloudflared.stop();
+            quick.stop();
             reject(new Error('the tunnel took too long to start.'));
         }, 60_000);
+        // the URL is printed before Cloudflare accepts connections for it, both may come in any order.
         let url;
-        cloudflared.once('url', (value) => (url = value));
-        cloudflared.once('connected', () => {
+        let connected = false;
+        const settle = () => {
+            if (!url || !connected) return;
             clearTimeout(timeout);
             resolve(url);
+        };
+        quick.once('url', (value) => {
+            url = value;
+            settle();
+        });
+        quick.once('connected', () => {
+            connected = true;
+            settle();
         });
         tunnel.exited.then(() => {
             clearTimeout(timeout);
             reject(
-                new Error(
-                    `the tunnel exited.\n${output.slice(-5).join('\n').trim()}`,
-                ),
+                new Error(`the tunnel exited.\n${output.join('\n').trim()}`),
             );
         });
     });

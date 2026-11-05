@@ -70,54 +70,71 @@ function handleRequest(request, response, share, log) {
     response.setHeader('X-Robots-Tag', 'noindex');
     response.setHeader('Referrer-Policy', 'no-referrer');
 
+    // browsers get the error pages as HTML.
+    const html = /text\/html/.test(request.headers.accept ?? '');
+    const reply = (code, text, headers) =>
+        send(response, code, text, headers, html);
+
     // unknown paths look the same with or without credentials.
     const parts = request.url.split('?')[0].split('/');
     if (parts.length === 2 && safeEqual(parts[1], share.probe)) {
-        return send(response, 200, 'OK.');
+        return send(response, 200, ['OK.']);
     }
+    const notFound = [
+        'Link not found',
+        'Check that the link is complete, or ask the sender for it again.',
+    ];
     if (parts.length > 3 || !safeEqual(parts[1], share.token)) {
-        return send(response, 404, 'Not found.');
+        return reply(404, notFound);
     }
     if (share.expired) {
-        return send(response, 410, 'This link has expired.');
+        return reply(410, [
+            'Link expired',
+            'This backup is no longer shared. Ask the sender for a new link.',
+        ]);
     }
     if (!safeEqual(basicCredentials(request), share.credentials)) {
-        return send(response, 401, 'Unauthorized.', {
-            'WWW-Authenticate': 'Basic realm="abr", charset="UTF-8"',
-        });
+        return reply(
+            401,
+            [
+                'Password needed',
+                'Sign in with the user "abr" & the password from the sender.',
+            ],
+            { 'WWW-Authenticate': 'Basic realm="abr", charset="UTF-8"' },
+        );
     }
     if (!['GET', 'HEAD'].includes(request.method)) {
-        return send(response, 405, 'Method not allowed.', {
+        return reply(405, ['Method not allowed', 'Use GET or HEAD.'], {
             Allow: 'GET, HEAD',
         });
     }
 
     if (parts.length === 2) {
-        return send(response, 308, 'Moved.', {
+        return reply(308, ['Moved', 'The page moved.'], {
             Location: `/${share.token}/`,
         });
     }
     if (parts[2] === '') {
         response.writeHead(200, {
             'Content-Type': 'text/html; charset=utf-8',
-            'Content-Security-Policy':
-                "default-src 'none'; style-src 'unsafe-inline'",
+            'Content-Security-Policy': pagePolicy,
         });
         return response.end(request.method === 'HEAD' ? '' : page(share));
     }
     if (parts[2] !== encodeURIComponent(share.name)) {
-        return send(response, 404, 'Not found.');
+        return reply(404, notFound);
     }
 
     download(request, response, share, log);
 }
 
-function send(response, code, text, headers = {}) {
+function send(response, code, text, headers = {}, html = false) {
     response.writeHead(code, {
-        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Type': `text/${html ? 'html' : 'plain'}; charset=utf-8`,
+        ...(html && { 'Content-Security-Policy': pagePolicy }),
         ...headers,
     });
-    response.end(`${text}\n`);
+    response.end(html ? errorPage(...text) : `${text.join(' ')}\n`);
 }
 
 /**
@@ -131,7 +148,7 @@ function download(request, response, share, log) {
             ? parseRange(request.headers.range, share.size)
             : null;
     if (range === 'unsatisfiable') {
-        return send(response, 416, 'Range not satisfiable.', {
+        return send(response, 416, ['Range not satisfiable.'], {
             'Content-Range': `bytes */${share.size}`,
         });
     }
@@ -209,39 +226,136 @@ function safeEqual(a = '', b = '') {
     return crypto.timingSafeEqual(digest(a), digest(b));
 }
 
-function page(share) {
-    const escape = (text) =>
-        String(text).replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
-    const name = escape(share.name);
+const styles = `
+:root { --pink: #fd366e; --bg: #f4f4f7; --card: #fff; --text: #19191c; --muted: #6c6c71; --line: #e8e8ec; --code: #f6f6f8; }
+@media (prefers-color-scheme: dark) { :root { --bg: #111113; --card: #19191c; --text: #ededf0; --muted: #97979b; --line: #2d2d31; --code: #222226; } }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; display: grid; place-items: center; padding: 2rem 1rem; }
+main { width: 100%; max-width: 44rem; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: clamp(1.25rem, 4vw, 2rem); }
+header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.5rem; }
+h1 { font-size: 1.25rem; margin: 0; flex: 1; }
+.badge { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: var(--pink); border: 1px solid var(--pink); border-radius: 999px; padding: 0.15rem 0.6rem; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.45rem 1.25rem; margin: 0 0 1.75rem; }
+dt { color: var(--muted); }
+dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+code, pre { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.download { display: block; text-align: center; background: var(--pink); color: #fff; font-weight: 600; text-decoration: none; padding: 0.85rem; border-radius: 10px; }
+.download:hover { background: #e92d62; }
+.notice { margin: 0; padding: 0.85rem 1rem; border-radius: 10px; border: 1px solid var(--line); background: var(--code); color: var(--muted); }
+h2 { font-size: 0.95rem; margin: 1.75rem 0 0.4rem; display: flex; align-items: center; gap: 0.5rem; }
+h2 span { display: inline-grid; place-items: center; width: 1.35rem; height: 1.35rem; border-radius: 50%; background: var(--pink); color: #fff; font-size: 0.75rem; }
+p { margin: 0 0 0.6rem; color: var(--muted); }
+p code { color: var(--text); }
+.cmd { display: flex; align-items: center; gap: 0.5rem; background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 0.4rem 0.4rem 0.4rem 0.85rem; }
+.cmd pre { flex: 1; min-width: 0; margin: 0; padding: 0.35rem 0; white-space: pre; overflow-x: auto; }
+.cmd button { flex: none; font: 12px system-ui, sans-serif; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 0.25rem 0.65rem; cursor: pointer; }
+.cmd button:hover { border-color: var(--muted); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--pink); outline-offset: 2px; }
+footer { margin-top: 1.75rem; padding-top: 1rem; border-top: 1px solid var(--line); font-size: 0.8rem; color: var(--muted); }
+`;
+
+/**
+ * Shows the expiry in the visitor's time & swaps the download for a notice once it passed. Copies commands.
+ */
+const script = `
+const time = document.querySelector('time');
+const deadline = new Date(time.dateTime);
+const at = deadline.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const tick = () => {
+    const minutes = Math.ceil((deadline - Date.now()) / 60000);
+    if (minutes > 0) {
+        time.textContent = (minutes === 1 ? 'in a minute' : 'in ' + minutes + ' minutes') + ', at ' + at;
+        return;
+    }
+    time.textContent = 'expired at ' + at;
+    document.querySelector('.download').outerHTML = '<p class="notice">This link has expired. Ask the sender for a new one.</p>';
+    document.querySelector('.steps').remove();
+    clearInterval(timer);
+};
+const timer = setInterval(tick, 15000);
+tick();
+document.querySelectorAll('[data-copy]').forEach((button) =>
+    button.addEventListener('click', async () => {
+        await navigator.clipboard.writeText(button.previousElementSibling.textContent);
+        button.textContent = 'Copied';
+        setTimeout(() => (button.textContent = 'Copy'), 1500);
+    }),
+);
+`;
+
+/**
+ * The only script pages may run, by its hash in the Content-Security-Policy.
+ */
+const pagePolicy = `default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${crypto.createHash('sha256').update(script).digest('base64')}'`;
+
+const lock = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>`;
+
+function escape(text) {
+    return String(text).replace(
+        /[&<>"']/g,
+        (char) => `&#${char.charCodeAt(0)};`,
+    );
+}
+
+function layout(title, body, withScript = false) {
     return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Appwrite backup</title>
-<style>
-body { font: 16px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 3rem auto; padding: 0 1rem; color: #222; }
-code, pre { font: 14px ui-monospace, monospace; background: #f4f4f5; border-radius: 4px; }
-pre { padding: 0.75rem; white-space: pre-wrap; word-break: break-all; }
-a.download { display: inline-block; padding: 0.5rem 1rem; background: #fd366e; color: #fff; border-radius: 6px; text-decoration: none; }
-</style>
+<meta name="color-scheme" content="light dark">
+<title>${escape(title)}</title>
+<style>${styles}</style>
 </head>
 <body>
-<h1>Appwrite backup</h1>
-<p>
-<b>File:</b> <code>${name}</code><br>
-<b>Size:</b> ${escape(formatSize(share.size / 1024))} (${share.size} bytes)<br>
-<b>SHA-256:</b> <code>${share.sha256}</code><br>
-<b>Link expires:</b> ${escape(new Date(share.deadline).toUTCString())}
-</p>
-<p><a class="download" href="${escape(encodeURIComponent(share.name))}" download>Download</a></p>
-<p>Or via curl, resumable if interrupted, it asks for the password:</p>
-<pre>${escape(curlCommand(share))}</pre>
-<p>Check the download:</p>
-<pre>echo ${escape(quote(`${share.sha256}  ${share.name}`))} | shasum -a 256 -c</pre>
-<p>The backup is encrypted. Put it in <code>backups/</code> &amp; run <code>abr restore</code>, which asks for its passphrase, or decrypt it via <code>gpg -d ${escape(quote(share.name))} &gt; ${escape(quote(share.name.replace(/\.gpg$/, '')))}</code>.</p>
+<main>
+${body}
+</main>${withScript ? `\n<script>${script}</script>` : ''}
 </body>
 </html>
 `;
+}
+
+/**
+ * A short error page in the share's style, for browsers.
+ */
+function errorPage(title, message) {
+    return layout(
+        title,
+        `<header><h1>${escape(title)}</h1></header>\n<p>${escape(message)}</p>\n<footer>Shared with ABR.</footer>`,
+    );
+}
+
+function page(share) {
+    const name = escape(share.name);
+    const deadline = new Date(share.deadline);
+    const command = (text) =>
+        `<div class="cmd"><pre>${escape(text)}</pre><button type="button" data-copy>Copy</button></div>`;
+    return layout(
+        `Appwrite backup · ${share.name}`,
+        `<header>
+<h1>Appwrite backup</h1>
+<span class="badge">${lock}Encrypted</span>
+</header>
+<dl>
+<dt>File</dt><dd><code>${name}</code></dd>
+<dt>Size</dt><dd>${escape(formatSize(share.size / 1024))}</dd>
+<dt>Expires</dt><dd><time datetime="${deadline.toISOString()}">${escape(deadline.toUTCString())}</time></dd>
+<dt>SHA-256</dt><dd><code>${share.sha256}</code></dd>
+</dl>
+<a class="download" href="${escape(encodeURIComponent(share.name))}" download>Download backup</a>
+<div class="steps">
+<h2><span>1</span>Or download with curl</h2>
+<p>Asks for the password & resumes if the connection drops.</p>
+${command(curlCommand(share))}
+<h2><span>2</span>Check the download</h2>
+${command(`echo ${quote(`${share.sha256}  ${share.name}`)} | shasum -a 256 -c`)}
+<h2><span>3</span>Restore it</h2>
+<p>Put it in <code>backups/</code> next to your <code>appwrite/</code> folder, then run <code>abr restore</code> & enter the backup's passphrase. Or decrypt it yourself:</p>
+${command(`gpg -d ${quote(share.name)} > ${quote(share.name.replace(/\.gpg$/, ''))}`)}
+</div>
+<footer>Shared with ABR. The password & passphrase come from the sender, separately from this link.</footer>`,
+        true,
+    );
 }

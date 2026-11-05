@@ -273,6 +273,8 @@ export default class Backup {
                 if (snapshot) removeMariaDBSnapshotSync(snapshot, archive);
                 else dockerSync(['rm', '-f', archive], { reject: false });
                 removePathSync(partialFile(file));
+                // offen's plain archive, if it got no passphrase.
+                removePathSync(partialFile(file).replace(/\.gpg$/, ''));
                 stack.command?.kill();
                 this.#warnAppwriteDown(stack);
                 const down = stack.stopped || stack.paused;
@@ -510,8 +512,15 @@ export default class Backup {
 
         // offen writes a plain archive without a passphrase, never keep that as encrypted.
         if (passphrase && !fs.existsSync(partial)) {
-            await removePath(partial.replace(/\.gpg$/, ''));
-            console.log(chalk.red('❌ The archive was not encrypted.'));
+            const plain = partial.replace(/\.gpg$/, '');
+            const removed = await removePath(plain);
+            console.log(
+                chalk.red(
+                    removed
+                        ? '❌ The archive was not encrypted, it was removed.'
+                        : `❌ The archive was not encrypted, remove "${plain}".`,
+                ),
+            );
             process.exitCode = 1;
             return false;
         }

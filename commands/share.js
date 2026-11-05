@@ -274,6 +274,10 @@ export default class Share {
                 (await reachesPublicly(`${url}/${share.probe}`, stopped));
             // stopped meanwhile, no link to print.
             if (interrupted) url = null;
+            // the tunnel died while checking, its link would be dead.
+            if (url && tunnel.subprocess.exitCode !== null) {
+                throw new Error('the tunnel stopped.');
+            }
             loader.stop();
 
             if (url) {

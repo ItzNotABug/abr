@@ -148,7 +148,7 @@ export default class Restore {
                 (await this.#readArchive(file, passphrase));
             restored =
                 Boolean(volumes) &&
-                (await this.#removeRemnants(volumes)) &&
+                (await this.#removeRemnants(volumes, this.#extractor(file))) &&
                 (await this.#extractArchive(file, volumes, passphrase));
         } catch (error) {
             // Ctrl+C at a prompt, handled in index.js.
@@ -284,15 +284,12 @@ export default class Restore {
     }
 
     /**
-     * Pulls the images restoring the archive needs, before anything is removed.
-     * Also the plain extractor, for root fallbacks.
+     * Pulls the image restoring the archive needs, before anything is removed.
      */
     static async #pullImages(file) {
         loader.start(chalk.blue('Preparing the restore...'));
         try {
-            await pullImages([
-                ...new Set([this.#extractor(file), extractorImage]),
-            ]);
+            await pullImages([this.#extractor(file)]);
             loader.stop();
             return true;
         } catch (error) {
@@ -308,9 +305,10 @@ export default class Restore {
     /**
      * Removes the install's containers & volumes, the volumes the backup restores & the `appwrite` folder, once confirmed.
      *
+     * @param image already pulled, for root fallbacks.
      * @returns {Promise<boolean>} `false` if declined or failed.
      */
-    static async #removeRemnants(volumes) {
+    static async #removeRemnants(volumes, image) {
         let remnants;
         try {
             remnants = await this.#findRemnants(volumes);
@@ -383,7 +381,7 @@ export default class Restore {
                 await docker(['volume', 'rm', '-f', ...volumeNames]);
             }
             // e.g. root-owned, as created by Appwrite's installer.
-            if (!(await removePath(appwriteDir(), extractorImage))) {
+            if (!(await removePath(appwriteDir(), image))) {
                 throw new Error(`could not remove ${appwriteDir()}.`);
             }
         } catch (error) {

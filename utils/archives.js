@@ -9,7 +9,7 @@ import { docker, dockerSync, helperArgs } from './misc.js';
 /**
  * Backup archive names start with their UTC time, `backup-YYYY-MM-DDTHH-MM-SS`.
  */
-export const backupFilePattern =
+const backupFilePattern =
     /^backup-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/;
 
 export function backupsDir() {
@@ -28,9 +28,7 @@ export function isEncrypted(file) {
 /**
  * Returns an unused path for a new backup archive.
  */
-export function newBackupFile(encrypted = false) {
-    // created by ABR, `docker run -v` would create it as root.
-    fs.mkdirSync(backupsDir(), { recursive: true });
+export function newBackupFile(encrypted) {
     const timestamp = new Date()
         .toISOString()
         .slice(0, 19)
@@ -52,9 +50,9 @@ export function newBackupFile(encrypted = false) {
 /**
  * The file's SHA-256, in hex.
  */
-export async function hashFile(file, signal) {
+export async function hashFile(file) {
     const hash = crypto.createHash('sha256');
-    await pipeline(fs.createReadStream(file), hash, { signal });
+    await pipeline(fs.createReadStream(file), hash);
     return hash.digest('hex');
 }
 
@@ -109,11 +107,11 @@ export async function selectBackup(files, message) {
     }
 
     // newest first, a single Enter picks the latest backup.
-    const backups = [...files].reverse().map((file) => {
+    const choices = [...files].reverse().map((file) => {
         const dateMatch = file.match(backupFilePattern);
         const lock = isEncrypted(file) ? ', encrypted' : '';
         if (!dateMatch) {
-            return { name: file, displayDate: `Unknown${lock}` };
+            return { name: `${file} (Unknown${lock})`, value: file };
         }
 
         const [, year, month, day, hour, minute] = dateMatch;
@@ -123,7 +121,7 @@ export async function selectBackup(files, message) {
         const formattedHour = ((hourInt + 11) % 12) + 1; // Convert to 12-hour format
         const formattedDate = `${day}/${month}/${year} @ ${formattedHour}:${minute} ${period}`;
 
-        return { name: file, displayDate: `${formattedDate}${lock}` };
+        return { name: `${file} (${formattedDate}${lock})`, value: file };
     });
 
     console.log('\n');
@@ -134,10 +132,7 @@ export async function selectBackup(files, message) {
             type: 'select',
             name: 'selectedBackup',
             message,
-            choices: backups.map((b) => ({
-                name: `${b.name} (${b.displayDate})`,
-                value: b.name,
-            })),
+            choices,
         },
     ]);
 

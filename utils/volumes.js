@@ -25,6 +25,7 @@ export async function existingVolumes(volumes) {
  * @returns {Promise<{sizes: Map<string, number>, skipped: number, tmp: Disk, scratch: Disk, archive: Disk}>} with `Disk` as `{id, free}`.
  */
 export async function measureVolumes(volumes, databaseVolume, globs) {
+    // created by ABR, `docker run -v` would create it as root.
     fs.mkdirSync(backupsDir(), { recursive: true });
 
     const { stdout } = await docker(
@@ -87,7 +88,7 @@ export async function measureVolumes(volumes, databaseVolume, globs) {
  *
  * @param excluded volumes listed as not backed up.
  */
-export function printVolumeSizes({ sizes }, volumes, excluded = []) {
+export function printVolumeSizes({ sizes }, volumes, excluded) {
     const table = new Table({
         head: [chalk.blue('Volume Name'), chalk.blue('Size')],
         colWidths: [40, 15],

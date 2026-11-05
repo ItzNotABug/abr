@@ -1,5 +1,6 @@
 import chalk from 'chalk';
-import { abrLabel, docker, dockerSync, sleep, sleepSync } from '../misc.js';
+import { setTimeout as wait } from 'timers/promises';
+import { abrLabel, docker, dockerSync, sleepSync } from '../misc.js';
 import * as mariadb from './mariadb.js';
 import * as mongodb from './mongodb.js';
 
@@ -21,13 +22,6 @@ export async function inspectDatabase(container) {
 
     const [{ State, Image, Config }] = JSON.parse(stdout);
     return { status: State.Status, image: Image, env: Config.Env ?? [] };
-}
-
-/**
- * Returns the snapshot container & volume name for a backup.
- */
-export function snapshotName(id) {
-    return `abr-db-snapshot-${id}`;
 }
 
 /**
@@ -86,7 +80,7 @@ export async function removeSnapshot(snapshot, ...containers) {
             reject: false,
         });
         if (exitCode === 0) return;
-        await sleep(500);
+        await wait(500);
     }
 
     warnSnapshotLeft(snapshot);

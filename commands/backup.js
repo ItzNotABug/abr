@@ -13,6 +13,7 @@ import {
     handleInterrupts,
     helperArgs,
     installFiles,
+    printError,
     runCompose,
     signalExitCode,
 } from '../utils/misc.js';
@@ -33,7 +34,6 @@ import {
     removeSnapshot,
     removeSnapshotSync,
     snapshotDatabase,
-    snapshotName,
     warnLeftoverSnapshots,
 } from '../utils/adapters/index.js';
 import {
@@ -85,7 +85,6 @@ export default class Backup {
             return;
         }
         const { database } = compose;
-        const { name } = database.adapter;
 
         console.log('\n');
 
@@ -119,29 +118,20 @@ export default class Backup {
         let measure;
         try {
             volumes = await existingVolumes(compose.volumes);
-            if (volumes.includes(database.volume)) {
-                measure = await measureVolumes(
-                    volumes,
-                    database.volume,
-                    database.adapter.skipped,
+            if (!volumes.includes(database.volume)) {
+                throw new Error(
+                    `${database.adapter.name}'s volume "${database.volume}" does not exist.`,
                 );
             }
+            measure = await measureVolumes(
+                volumes,
+                database.volume,
+                database.adapter.skipped,
+            );
             loader.stop();
         } catch (error) {
             loader.stop();
-            console.log(
-                chalk.red('❌ Error checking volume sizes:'),
-                error.stderr?.trim() || error.message,
-            );
-            process.exitCode = 1;
-            return;
-        }
-        if (!volumes.includes(database.volume)) {
-            console.log(
-                chalk.red(
-                    `❌ ${name}'s volume "${database.volume}" does not exist.`,
-                ),
-            );
+            printError('Error checking volume sizes:', error);
             process.exitCode = 1;
             return;
         }
@@ -230,7 +220,7 @@ export default class Backup {
         }
 
         const id = Date.now();
-        const snapshot = snapshotName(id);
+        const snapshot = `abr-db-snapshot-${id}`;
         const archive = `abr-archive-${id}`;
         const file = newBackupFile(Boolean(passphrase));
         // `command` is the running stop, pause or bring back, killed on a forced exit.
@@ -314,22 +304,17 @@ export default class Backup {
     }
 
     /**
-     * Asks whether to go ahead when the archive may not fit, `false` if declined or not interactive.
+     * Asks whether to go ahead when the archive may not fit, `false` if declined.
+     * A closed stdin ends the prompt, which exits with 1 in index.js.
      */
     static async #confirmLowSpace() {
-        // every type has Appwrite running again on these disks afterwards.
-        const message =
-            'The size is estimated without compression, the archive may still fit. If a disk fills up, Appwrite may fail writes until space is freed.';
-        if (!process.stdin.isTTY) {
-            console.log(chalk.red(`❌ Not enough disk space. ${message}`));
-            return false;
-        }
-
         const { proceed } = await inquirer.prompt([
             {
                 type: 'confirm',
                 name: 'proceed',
-                message: `${message} Continue anyway?`,
+                // every type has Appwrite running again on these disks afterwards.
+                message:
+                    'The size is estimated without compression, the archive may still fit. If a disk fills up, Appwrite may fail writes until space is freed. Continue anyway?',
                 default: false,
             },
         ]);
@@ -467,11 +452,9 @@ export default class Backup {
         try {
             await movePath(partial, file);
         } catch (error) {
-            console.log(
-                chalk.red(
-                    `❌ The backup is complete, but could not be renamed from "${path.basename(partial)}":`,
-                ),
-                error.stderr?.trim() || error.message,
+            printError(
+                `The backup is complete, but could not be renamed from "${path.basename(partial)}":`,
+                error,
             );
             console.log(
                 chalk.yellow(

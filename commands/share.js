@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import * as path from 'path';
 import loading from 'loading-cli';
 import { setTimeout as wait } from 'timers/promises';
-import { handleInterrupts, signalExitCode } from '../utils/misc.js';
+import { handleInterrupts, printError, signalExitCode } from '../utils/misc.js';
 import {
     hashFile,
     isEncrypted,
@@ -154,25 +154,13 @@ export default class Share {
     static async #prepare(file) {
         loader.start(chalk.blue('Preparing the share...'));
         try {
-            // either failing stops the other, the process couldn't exit before.
-            const controller = new AbortController();
-            const stopOnFailure = (promise) =>
-                promise.catch((error) => {
-                    controller.abort();
-                    throw error;
-                });
-            const [sha256] = await Promise.all([
-                stopOnFailure(hashFile(file, controller.signal)),
-                stopOnFailure(prepareCloudflared()),
-            ]);
+            await prepareCloudflared();
+            const sha256 = await hashFile(file);
             loader.stop();
             return { sha256, size: fs.statSync(file).size };
         } catch (error) {
             loader.stop();
-            console.log(
-                chalk.red('❌ Could not prepare the share:'),
-                error.stderr?.trim() || error.message,
-            );
+            printError('Could not prepare the share:', error);
             return null;
         }
     }

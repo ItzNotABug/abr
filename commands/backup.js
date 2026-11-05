@@ -246,6 +246,7 @@ export default class Backup {
             database.volume,
             snapshotted,
             Boolean(passphrase),
+            Boolean(database.adapter.dumpFile),
         );
         if (space === 'snapshot') {
             console.log(
@@ -328,7 +329,7 @@ export default class Backup {
 
             archived = await this.#archiveVolumes({
                 volumes,
-                files: [...installFiles, ...database.files],
+                files: [...new Set([...installFiles, ...database.files])],
                 replace: snapshot && { [database.volume]: snapshot },
                 archive,
                 file,

@@ -116,6 +116,7 @@ export function printVolumeSizes({ sizes }, volumes, excluded = []) {
  * @param databaseVolume the database's volume.
  * @param snapshotted whether the database is snapshotted first, which skips the measured `skipped` files.
  * @param encrypted whether the archive is encrypted, offen keeps both copies in its `/tmp` meanwhile.
+ * @param dumped whether the snapshot is a compressed dump, the volume's size then covers it & its archived copy.
  * @returns {'ok'|'snapshot'|'archive'} what may not fit.
  */
 export function checkDiskSpace(
@@ -123,6 +124,7 @@ export function checkDiskSpace(
     databaseVolume,
     snapshotted,
     encrypted,
+    dumped,
 ) {
     const skipped = snapshotted ? measure.skipped : 0;
     const snapshot = snapshotted
@@ -140,7 +142,7 @@ export function checkDiskSpace(
                     ...measure.scratch,
                     free: Math.min(measure.scratch.free, measure.tmp.free),
                 },
-                snapshot * 2,
+                dumped ? snapshot : snapshot * 2,
             ],
         ])
     ) {

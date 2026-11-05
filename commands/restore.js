@@ -182,6 +182,8 @@ export default class Restore {
             .filter(({ dumpFile }) => dumpFile)
             .map(({ volume, dumpFile }) => `${volume}/${dumpFile}`);
         const dumps = new Set();
+        // volumes with other entries, e.g. a stale dump next to a cold backup's data files.
+        const filled = new Set();
         const unexpected = new Set();
         // names become `docker run -v` sources & are removed first, so only Appwrite's own volumes.
         // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
@@ -229,8 +231,17 @@ export default class Restore {
                     }
                 } else if (appwriteVolumeName.test(dir)) {
                     volumes.add(dir);
-                    const top = parts.slice(1).join('/');
-                    if (type === '-' && dumpPaths.includes(top)) dumps.add(top);
+                    if (parts.length < 3) continue;
+                    const top = `${dir}/${parts[2]}`;
+                    if (
+                        parts.length === 3 &&
+                        type === '-' &&
+                        dumpPaths.includes(top)
+                    ) {
+                        dumps.add(top);
+                    } else {
+                        filled.add(dir);
+                    }
                 } else {
                     unexpected.add(`backup/${dir}`);
                 }
@@ -275,10 +286,13 @@ export default class Restore {
         }
 
         // the backed up install's database: the one with a dump, else with a volume. installs before 1.9 always run MariaDB.
+        // a hot backup's database volume holds only its dump.
+        const dumped = (volume, dumpFile) =>
+            dumps.has(`${volume}/${dumpFile}`) && !filled.has(volume);
         const candidates = Object.values(adapters);
         const adapter =
             candidates.find(({ volume, dumpFile }) =>
-                dumps.has(`${volume}/${dumpFile}`),
+                dumped(volume, dumpFile),
             ) ?? candidates.find(({ volume }) => volumes.has(volume));
         if (!adapter) {
             console.log(chalk.red('❌ The backup has no database volume.'));
@@ -289,7 +303,7 @@ export default class Restore {
         return {
             volumes: [...volumes],
             adapter,
-            dumped: dumps.has(`${adapter.volume}/${adapter.dumpFile}`),
+            dumped: dumped(adapter.volume, adapter.dumpFile),
         };
     }
 

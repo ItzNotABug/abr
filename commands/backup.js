@@ -274,7 +274,9 @@ export default class Backup {
                 else dockerSync(['rm', '-f', archive], { reject: false });
                 removePathSync(partialFile(file));
                 // offen's plain archive, if it got no passphrase.
-                removePathSync(partialFile(file).replace(/\.gpg$/, ''));
+                if (passphrase) {
+                    removePathSync(partialFile(file).replace(/\.gpg$/, ''));
+                }
                 stack.command?.kill();
                 this.#warnAppwriteDown(stack);
                 const down = stack.stopped || stack.paused;
@@ -500,6 +502,8 @@ export default class Backup {
             // stop the container first so it can't write again.
             await docker(['rm', '-f', archive], { reject: false });
             await removePath(partial);
+            // offen's plain archive, if it got no passphrase.
+            if (passphrase) await removePath(partial.replace(/\.gpg$/, ''));
             if (signal.aborted) return false;
 
             console.log(

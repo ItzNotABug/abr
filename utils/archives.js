@@ -91,7 +91,7 @@ export function listBackups() {
             // by name without extensions, `-1` collision suffixes sort before `.` otherwise.
             .sort((a, b) => {
                 const base = (file) => file.replace(/\.tar\.gz(\.gpg)?$/, '');
-                return base(a).localeCompare(base(b), 'en');
+                return base(a).localeCompare(base(b), 'en', { numeric: true });
             })
     );
 }

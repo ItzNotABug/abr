@@ -256,6 +256,7 @@ export default class Share {
                     if (interrupted) break;
                 }
                 tunnel = startTunnel(port);
+                tunnel.exited.then(() => (tunnel.done = true));
                 try {
                     url = await Promise.race([
                         tunnel.url,
@@ -275,7 +276,7 @@ export default class Share {
             // stopped meanwhile, no link to print.
             if (interrupted) url = null;
             // the tunnel died while checking, its link would be dead.
-            if (url && tunnel.subprocess.exitCode !== null) {
+            if (url && tunnel.done) {
                 throw new Error('the tunnel stopped.');
             }
             loader.stop();
@@ -459,6 +460,8 @@ async function reachesPublicly(url, stopped) {
             const response = await fetch(url, {
                 signal: AbortSignal.timeout(5000),
             });
+            // read, an unread body keeps its connection.
+            await response.body?.cancel();
             if (response.ok) return true;
         } catch {
             // not resolvable or reachable yet.

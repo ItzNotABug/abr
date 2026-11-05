@@ -375,9 +375,12 @@ function status(share) {
     const text = share.expired
         ? '⏳ The link expired, waiting for downloads to finish.'
         : `⏳ Expires in ${formatRemaining(share.deadline - Date.now())}${share.active ? `, ${downloads} running` : ''}.`;
-    process.stdout.write(
-        `\r\x1b[K${chalk.blue(`${text} Press Ctrl+C to stop.`)}`,
+    // within the terminal's width, a wrapped line isn't cleared by `\r`.
+    const line = `${text} Press Ctrl+C to stop.`.slice(
+        0,
+        (process.stdout.columns || 80) - 1,
     );
+    process.stdout.write(`\r\x1b[K${chalk.blue(line)}`);
 }
 
 function clearStatus() {
@@ -428,12 +431,15 @@ function formatRemaining(ms) {
  */
 async function reachesPublicly(url, ended) {
     let done = false;
-    ended.then(() => (done = true));
+    let controller;
+    ended.then(() => {
+        done = true;
+        controller?.abort();
+    });
     for (const deadline = Date.now() + 60_000; Date.now() < deadline; ) {
         if (done) return false;
-        const controller = new AbortController();
+        controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5000);
-        ended.then(() => controller.abort());
         try {
             const response = await fetch(url, { signal: controller.signal });
             // read, an unread body keeps its connection.

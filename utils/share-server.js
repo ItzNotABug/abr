@@ -351,7 +351,7 @@ function page(share) {
 <p>Asks for the password & resumes if the connection drops.</p>
 ${command(curlCommand(share))}
 <h2><span>2</span>Check the download</h2>
-${command(`echo ${quote(`${share.sha256}  ${share.name}`)} | shasum -a 256 -c`)}
+${command(`echo ${quote(`${share.sha256}  ${share.name}`)} | (if command -v sha256sum >/dev/null; then sha256sum -c -; else shasum -a 256 -c; fi)`)}
 <h2><span>3</span>Restore it</h2>
 <p>Put it in <code>backups/</code> next to your <code>appwrite/</code> folder, then run <code>abr restore</code> & enter the backup's passphrase. Or decrypt it yourself:</p>
 ${command(`gpg -d ${quote(share.name)} > ${quote(share.name.replace(/\.gpg$/, ''))}`)}

@@ -8,6 +8,7 @@ import {
     appwriteDir,
     checkDocker,
     appwriteVolumeName,
+    defaultVolumes,
     docker,
     helperArgs,
     installFiles,
@@ -28,23 +29,6 @@ import { existingVolumes } from '../utils/volumes.js';
 import { acquireLock } from '../utils/lock.js';
 
 const loader = loading('');
-
-/**
- * Volume names of default Appwrite installs, past & present, to also find unlabelled volumes of earlier restores.
- */
-const defaultVolumes = [
-    'builds',
-    'cache',
-    'certificates',
-    'config',
-    'executor',
-    'functions',
-    'imports',
-    'mariadb',
-    'redis',
-    'sites',
-    'uploads',
-].map((name) => `appwrite_appwrite-${name}`);
 
 /**
  * Extracts archives. GNU tar, busybox's ignores the PAX headers of files over 8 GB.

@@ -1,4 +1,4 @@
-import * as fs from 'fs';
+import { execa } from 'execa';
 
 /**
  * The cloudflared package, an optional dependency: loaded on first share, so backups & restores work without it.
@@ -17,9 +17,11 @@ export async function prepareCloudflared() {
             'the cloudflared package is missing, reinstall ABR. It may not support this platform.',
         );
     }
-    if (!fs.existsSync(cloudflared.bin)) {
-        await cloudflared.install(cloudflared.bin);
-    }
+    // also when broken, e.g. an install cut off midway.
+    const { failed } = await execa(cloudflared.bin, ['--version'], {
+        reject: false,
+    });
+    if (failed) await cloudflared.install(cloudflared.bin);
 }
 
 /**
@@ -50,7 +52,8 @@ export function startTunnel(port) {
         quick.once('exit', exited);
         quick.on('error', (error) => {
             output.push(error.message);
-            exited();
+            // only a failed start ends it, other errors leave cloudflared running.
+            if (!quick.process.pid) exited();
         });
     });
 

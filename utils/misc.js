@@ -28,6 +28,23 @@ ${chalk.blue('_'.repeat(146))}
 export const appwriteVolumeName = /^appwrite_appwrite-[a-z0-9-]+$/;
 
 /**
+ * Volume names of default Appwrite installs, past & present, to also find unlabelled volumes of earlier restores.
+ */
+export const defaultVolumes = [
+    'builds',
+    'cache',
+    'certificates',
+    'config',
+    'executor',
+    'functions',
+    'imports',
+    'mariadb',
+    'redis',
+    'sites',
+    'uploads',
+].map((name) => `appwrite_appwrite-${name}`);
+
+/**
  * MariaDB's volume in supported installs.
  */
 export const mariadbVolume = 'appwrite_appwrite-mariadb';

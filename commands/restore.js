@@ -392,9 +392,10 @@ export default class Restore {
         // the install's own project, another stack named `appwrite` isn't part of it.
         const filter = `label=com.docker.compose.project=${compose?.project ?? 'appwrite'}`;
         // the current compose may predate the caches.
-        const kept = cacheVolumes
-            .map((key) => `appwrite_${key}`)
-            .filter((volume) => !volumes.includes(volume));
+        const kept = [
+            ...cacheVolumes.map((key) => `appwrite_${key}`),
+            ...(compose?.excluded ?? []),
+        ].filter((volume) => !volumes.includes(volume));
 
         const list = async (args) =>
             (await docker(args)).stdout.split('\n').filter(Boolean);

@@ -160,7 +160,7 @@ export default class Backup {
             console.log(chalk.green('✅ Appwrite directory detected.'));
             return true;
         } else {
-            console.error(
+            console.log(
                 chalk.red(
                     '❌ Appwrite directory not detected in the current directory.',
                 ),
@@ -235,6 +235,7 @@ export default class Backup {
         const release = handleInterrupts((received) => {
             loader.stop();
             if (interrupted) {
+                stack.command?.kill();
                 // containers first, so they can't write again. `-v` also takes their anonymous volumes.
                 dockerSync(['rm', '-f', '-v', snapshot, archive]);
                 const partial = partialFile(file);
@@ -242,7 +243,6 @@ export default class Backup {
                 // offen's plain archive, if it got no passphrase.
                 if (passphrase) removePathSync(plainPartial(partial));
                 if (hot) removeSnapshotSync(snapshot, archive);
-                stack.command?.kill();
                 this.#warnAppwriteDown(stack);
                 process.exit(interrupted);
             }
@@ -304,17 +304,23 @@ export default class Backup {
     }
 
     /**
-     * Asks whether to go ahead when the archive may not fit, `false` if declined.
-     * A closed stdin ends the prompt, which exits with 1 in index.js.
+     * Asks whether to go ahead when the archive may not fit, `false` if declined or not interactive.
      */
     static async #confirmLowSpace() {
+        const message =
+            'The size is estimated without compression, the archive may still fit. If a disk fills up, Appwrite may fail writes until space is freed.';
+        // piped input isn't someone accepting that.
+        if (!process.stdin.isTTY) {
+            console.log(chalk.red(`❌ Not enough disk space. ${message}`));
+            return false;
+        }
+
         const { proceed } = await inquirer.prompt([
             {
                 type: 'confirm',
                 name: 'proceed',
                 // every type has Appwrite running again on these disks afterwards.
-                message:
-                    'The size is estimated without compression, the archive may still fit. If a disk fills up, Appwrite may fail writes until space is freed. Continue anyway?',
+                message: `${message} Continue anyway?`,
                 default: false,
             },
         ]);

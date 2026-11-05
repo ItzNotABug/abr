@@ -29,6 +29,9 @@ export function isEncrypted(file) {
  * Returns an unused path for a new backup archive.
  */
 export function newBackupFile(encrypted) {
+    // may be gone since measured, `docker run -v` would create it as root.
+    fs.mkdirSync(backupsDir(), { recursive: true });
+
     const timestamp = new Date()
         .toISOString()
         .slice(0, 19)

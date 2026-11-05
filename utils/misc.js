@@ -162,7 +162,7 @@ export function sleepSync(ms) {
 export function dockerSync(args) {
     return execaSync('docker', args, {
         reject: false,
-        timeout: 10_000,
+        timeout: 5000,
         // a child ignoring the default SIGTERM would keep blocking the exit.
         killSignal: 'SIGKILL',
     });
@@ -182,9 +182,13 @@ export async function pullImage(image) {
  * Prints an error under `title`, with docker's own words if it came from a command.
  */
 export function printError(title, error) {
-    console.error(
+    const stderr = error.stderr?.trim();
+    console.log(
         chalk.red(`❌ ${title}`),
-        error.stderr?.trim() || error.message,
+        // stderr may only hold progress, this still tells e.g. a kill.
+        stderr
+            ? `${stderr} (${error.signal ?? `exit code ${error.exitCode}`})`
+            : error.message,
     );
 }
 
@@ -299,7 +303,7 @@ export async function runCompose(
         loader.stop();
         if (harmless && error.message.includes(harmless)) return true;
 
-        console.error(chalk.red(`❌ ${failed}`), error.message);
+        console.log(chalk.red(`❌ ${failed}`), error.message);
         process.exitCode = 1;
         return false;
     }

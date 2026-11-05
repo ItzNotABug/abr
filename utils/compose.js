@@ -67,9 +67,7 @@ export async function readCompose() {
                     (mount) =>
                         mount.type === 'bind' &&
                         // files only, a folder or a missing file can't be archived as one.
-                        fs
-                            .statSync(mount.source, { throwIfNoEntry: false })
-                            ?.isFile() &&
+                        isFile(mount.source) &&
                         // real paths, compose may resolve a symlinked folder.
                         fs.realpathSync(path.dirname(mount.source)) ===
                             fs.realpathSync(appwriteDir()),
@@ -98,7 +96,7 @@ export async function readBackupCompose() {
 
     const { adapter } = compose.database;
     if (!adapter) {
-        console.error(
+        console.log(
             chalk.red(
                 `❌ Unsupported database, see _APP_DB_ADAPTER. Only ${Object.values(
                     adapters,
@@ -112,7 +110,7 @@ export async function readBackupCompose() {
 
     // e.g. a bind mount or a renamed volume, which restores wouldn't bring back.
     if (compose.database.volume !== adapter.volume) {
-        console.error(
+        console.log(
             chalk.red(
                 `❌ Unsupported ${adapter.name} data volume: ${compose.database.volume ?? 'none'}. Expected "${adapter.volume}".`,
             ),
@@ -129,4 +127,15 @@ export async function readBackupCompose() {
     }
 
     return compose;
+}
+
+/**
+ * Whether `target` is a regular file, `false` if it can't be read, e.g. mounted from a folder ABR's user can't enter.
+ */
+function isFile(target) {
+    try {
+        return fs.statSync(target).isFile();
+    } catch {
+        return false;
+    }
 }

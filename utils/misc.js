@@ -160,7 +160,12 @@ export function sleepSync(ms) {
  * {@link docker} for a forced exit, best effort, in ABR's process group as `execaSync` can't detach.
  */
 export function dockerSync(args) {
-    return execaSync('docker', args, { reject: false, timeout: 10_000 });
+    return execaSync('docker', args, {
+        reject: false,
+        timeout: 10_000,
+        // a child ignoring the default SIGTERM would keep blocking the exit.
+        killSignal: 'SIGKILL',
+    });
 }
 
 /**

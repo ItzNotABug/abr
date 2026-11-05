@@ -313,7 +313,9 @@ export default class Restore {
     static async #restoreDump(adapter) {
         loader.start(chalk.blue(`Restoring the ${adapter.name} dump...`));
         try {
-            await adapter.restoreDump();
+            // the restored install's service for the database.
+            const { database } = await readCompose();
+            await adapter.restoreDump(database.service);
             loader.stop();
         } catch (error) {
             loader.stop();

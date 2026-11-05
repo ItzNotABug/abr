@@ -274,7 +274,7 @@ export default class Backup {
         let interrupted = 0;
 
         // on interrupt, abort & let `finally` clean up & bring Appwrite back. a second one exits right away.
-        const release = handleInterrupts((name) => {
+        const release = handleInterrupts((received) => {
             loader.stop();
             if (interrupted) {
                 if (snapshot) removeSnapshotSync(snapshot, archive);
@@ -291,7 +291,7 @@ export default class Backup {
                     archived && !down ? (process.exitCode ?? 0) : interrupted,
                 );
             }
-            interrupted = signalExitCode(name);
+            interrupted = signalExitCode(received);
             controller.abort();
         });
 

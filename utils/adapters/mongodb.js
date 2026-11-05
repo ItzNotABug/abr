@@ -67,12 +67,12 @@ export async function snapshot(database, snapshot, signal) {
 }
 
 /**
- * Loads the dump a restore extracted into the empty volume, via a temporary mongod of the service without auth.
+ * Loads the dump a restore extracted into the empty volume, via a temporary mongod of the compose `service` without auth.
  *
  * The dump brings the users back, so the service's entrypoint skips its init & its healthcheck sets the replica set up again.
  * With auth, restoring the users would end mongorestore's own login.
  */
-export async function restoreDump() {
+export async function restoreDump(service) {
     await docker(
         [
             'compose',
@@ -82,13 +82,15 @@ export async function restoreDump() {
             '-T',
             '--entrypoint',
             'sh',
-            'mongodb',
+            service,
             '-c',
             `set -e
 mongod --dbpath ${dataDir} --bind_ip 127.0.0.1 --fork --logpath /tmp/mongod.log --quiet
 mongorestore --quiet --archive=${dataDir}/${dumpFile} --gzip --oplogReplay
 mongod --dbpath ${dataDir} --shutdown
-rm ${dataDir}/${dumpFile}`,
+rm ${dataDir}/${dumpFile}
+# as the image's own user, not root, in case the service starts mongod as it.
+chown -R mongodb:mongodb ${dataDir}`,
         ],
         { cwd: appwriteDir() },
     );

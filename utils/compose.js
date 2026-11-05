@@ -56,6 +56,7 @@ export async function readCompose() {
         project: config.name,
         database: {
             adapter,
+            service: key,
             container:
                 service &&
                 (service.container_name ?? `${config.name}-${key}-1`),
@@ -66,9 +67,7 @@ export async function readCompose() {
                     (mount) =>
                         mount.type === 'bind' &&
                         // files only, a folder or a missing file can't be archived as one.
-                        fs
-                            .statSync(mount.source, { throwIfNoEntry: false })
-                            ?.isFile() &&
+                        isFile(mount.source) &&
                         // real paths, compose may resolve a symlinked folder.
                         realPath(path.dirname(mount.source)) ===
                             realPath(appwriteDir()),
@@ -141,5 +140,16 @@ function realPath(target) {
         return fs.realpathSync(target);
     } catch {
         return target;
+    }
+}
+
+/**
+ * Whether `target` is a regular file, `false` if it can't be read.
+ */
+function isFile(target) {
+    try {
+        return fs.statSync(target).isFile();
+    } catch {
+        return false;
     }
 }

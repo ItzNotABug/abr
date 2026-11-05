@@ -93,11 +93,13 @@ export async function removeSnapshot(snapshot, ...containers) {
 }
 
 /**
- * Removes the snapshot's volume in a forced exit, after its containers.
+ * {@link removeSnapshot} in a forced exit, for up to 5s.
  */
-export function removeSnapshotVolumeSync(snapshot) {
-    // stays in use briefly while an interrupted sidecar is torn down.
-    for (let attempt = 0; attempt < 10; attempt++) {
+export function removeSnapshotSync(snapshot, ...containers) {
+    // stays in use briefly while an interrupted sidecar is torn down, or starts late.
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+        dockerSync(['rm', '-f', '-v', snapshot, ...containers]);
         if (!dockerSync(['volume', 'rm', '-f', snapshot]).failed) return;
         sleepSync(500);
     }

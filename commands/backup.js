@@ -31,7 +31,7 @@ import { acquireLock } from '../utils/lock.js';
 import {
     inspectDatabase,
     removeSnapshot,
-    removeSnapshotVolumeSync,
+    removeSnapshotSync,
     snapshotDatabase,
     snapshotName,
     warnLeftoverSnapshots,
@@ -240,17 +240,18 @@ export default class Backup {
         let archived = false;
         let interrupted = 0;
 
-        // on interrupt, abort & let `finally` clean up & bring Appwrite back. a second one exits right away:
+        // on interrupt, abort & let `finally` clean up & bring Appwrite back. a second one exits within seconds:
         // no backup keeps running & no plain archive stays.
         const release = handleInterrupts((received) => {
             loader.stop();
             if (interrupted) {
                 // containers first, so they can't write again. `-v` also takes their anonymous volumes.
                 dockerSync(['rm', '-f', '-v', snapshot, archive]);
-                if (hot) removeSnapshotVolumeSync(snapshot);
                 const partial = partialFile(file);
                 removePathSync(partial);
+                // offen's plain archive, if it got no passphrase.
                 if (passphrase) removePathSync(plainPartial(partial));
+                if (hot) removeSnapshotSync(snapshot, archive);
                 stack.command?.kill();
                 this.#warnAppwriteDown(stack);
                 process.exit(interrupted);

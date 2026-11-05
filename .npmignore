@@ -4,6 +4,7 @@
 .prettierignore
 
 #folders
+.claude
 .idea
 .github
 node_modules

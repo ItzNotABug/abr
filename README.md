@@ -11,68 +11,83 @@
 ![Node.js](https://img.shields.io/badge/Node.js-brightgreen?style=flat&logo=node.js&logoColor=white)
 ![Appwrite](https://img.shields.io/badge/Appwrite-FD366E?style=flat&logo=appwrite&logoColor=white)
 
-`#ABR` is powerful CLI tool for managing backups and restores of your Appwrite instance.\
-The package provides an easy and reliable way to back up all Appwrite data, including volumes and configurations, and
-restore them as needed.
+Back up, restore & share your self-hosted Appwrite instance from the command line.
+
+Supports Appwrite 1.8.x & 1.9.x, with MariaDB or MongoDB. Appwrite 2.x & PostgreSQL aren't supported yet.
 
 ## Installation
 
-Install the CLI tool globally using `npm`:
+Needs Node.js 20.5+ & Docker with Compose. This README describes the `beta` release:
 
-```npm
-npm install -g @itznotabug/abr
+```shell
+npm install -g @itznotabug/abr@beta
 ```
 
 ## Usage
 
-1. Head to the directory where you ran your previous Appwrite install command.
-    ```text
-    parent_directory <= you run the command in this directory
-    └── appwrite
-        └── docker-compose.yml
-    ```
+Run `abr` from the folder that holds your `appwrite` folder. Backups go to `backups`, next to it.
 
-2. Run the following command:
-    ```shell
-    abr backup | restore | share # or abr --help
-    ```
-
-    * Use `abr backup` to create a complete backup of your Appwrite instance.
-    * Use `abr backup --encrypt` to encrypt it with a passphrase, asked for or taken from `ABR_GPG_PASSPHRASE`.
-    * Use `abr restore` to select a backup file and restore your Appwrite instance, encrypted ones ask for their
-      passphrase.
-    * Use `abr share` to share an encrypted backup via a temporary download link, see below.
-
-## Sharing Backups
-
-`abr share` serves an encrypted backup via a [Cloudflare Quick Tunnel](https://try.cloudflare.com), no account or
-domain needed. It prints a link, a random password & the backup's SHA-256, then shows a countdown until the link
-expires, after 15 minutes by default:
-
-```shell
-abr share --expires 1h
+```text
+parent_directory <= run abr here
+├── appwrite
+│   ├── docker-compose.yml
+│   └── .env
+└── backups
 ```
 
-The link opens a page with the download & a resumable `curl` command. Press `Ctrl+C` to stop sharing early.
-Only encrypted backups can be shared, Cloudflare can read the traffic through its tunnel. The recipient restores
-it via `abr restore` with the passphrase, or decrypts it via `gpg -d`.
+| Command                 | What it does                                             |
+|-------------------------|----------------------------------------------------------|
+| `abr backup`            | Asks for a backup type & creates a backup.               |
+| `abr backup --encrypt`  | The same, encrypted with a passphrase.                   |
+| `abr restore`           | Asks for a backup & replaces the current install with it. |
+| `abr share`             | Shares an encrypted backup via a temporary link.         |
 
-## Considerations
+## Backup Types
 
-1. **Downtime During Restores**:\
-   Restores require Appwrite services to be reinstalled and set up anew, leading to temporary downtime. Plan accordingly
-   to minimize disruption, especially for production environments.
+| Type     | Appwrite during the backup | Database                                                    |
+|----------|----------------------------|-------------------------------------------------------------|
+| Hot      | Keeps running              | Snapshot via `mariadb-backup`, or `mongodump --oplog`       |
+| Semi-hot | Paused                     | Volume copy                                                 |
+| Cold     | Stopped, then restarted    | Volume copy                                                 |
 
+- Hot backups need a running database, and copy uploads & other files live.
+- To back up a stopped install & leave it stopped, use semi-hot. Cold starts it again.
+- Backups include Appwrite's volumes, `.env`, `docker-compose.yml` & the files the database mounts from `appwrite`.
+- The `appwrite-models` cache isn't backed up, it's downloaded again. Volumes you added aren't either, ABR warns about
+  them.
 
-2. **Cross Server Restores**:\
-   If you backed up an Appwrite instance running on `https://abc.com` but later restore it on   `https://xyz.com`, make
-   sure to update your `.env` file accordingly and perform a restart via `docker compose up -d`!
+## Restoring
 
+`abr restore` reads the whole backup first, then lists what it will remove & asks you to confirm.\
+It removes the install's containers, volumes & `appwrite` folder, so Appwrite is down during the restore.
 
-3. **Edge Cases**:\
-   Not all machines, environments, and Docker setups are identical. Some configurations might behave differently,
-   especially if you're using tools like `Portainer`, `Coolify` or something other. `#ABR` is primarily tested on a
-   standard Docker setup.
+If the instance moves to another domain, update `.env` & run `docker compose up -d` in `appwrite`.
+
+## Encryption
+
+`abr backup --encrypt` asks for a passphrase, or reads `ABR_GPG_PASSPHRASE`. A lost passphrase can't be recovered.\
+`abr restore` asks for it too. You can also decrypt a backup yourself via `gpg -d`.
+
+## Sharing
+
+`abr share` serves an encrypted backup through a [Cloudflare Quick Tunnel](https://try.cloudflare.com). It needs no
+account, domain or Docker.
+
+```shell
+abr share --expires 1h # 15m by default, up to 24h
+```
+
+It prints a link, a password shown only once & the backup's SHA-256. The link's page has the download, plus `curl`,
+checksum & restore commands. Press `Ctrl+C` to stop early.
+
+Only encrypted backups can be shared, as Cloudflare can read the traffic through its tunnel. Send the password &
+passphrase separately from the link.
+
+## Limitations
+
+- Backups ask for their type in a terminal, so scheduled backups aren't supported yet.
+- Only the default `appwrite` Compose project is supported.
+- ABR is tested on standard Docker setups. Tools like Portainer or Coolify may behave differently.
 
 ## Support the Project
 

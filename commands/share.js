@@ -8,7 +8,6 @@ import {
     helperImage,
     pullImages,
     signalExitCode,
-    sleep,
 } from '../utils/misc.js';
 import {
     hashFile,
@@ -251,7 +250,7 @@ export default class Share {
                     loader.text = chalk.blue(
                         `Starting the tunnel, attempt ${attempt} of ${attempts}...`,
                     );
-                    await Promise.race([sleep(2000 * attempt), stopped]);
+                    await Promise.race([wait(2000 * attempt), stopped]);
                 }
                 if (interrupted) break;
 
@@ -268,15 +267,21 @@ export default class Share {
                         (await reachesPublicly(`${url}/${share.probe}`, ended));
                 } catch (error) {
                     url = null;
-                    if (attempt === attempts) throw error;
+                    if (attempt === attempts) {
+                        error.message +=
+                            ' An old cloudflared may no longer be supported, try "docker pull cloudflare/cloudflared".';
+                        throw error;
+                    }
                     continue;
                 }
                 if (interrupted) break;
                 // a running tunnel is kept, its link confirmed or not.
-                if (url !== null && !(await isDone(tunnel))) break;
+                if (url !== null && !tunnel.done) break;
                 url = null;
                 if (attempt === attempts) {
-                    throw new Error('the tunnel stopped.');
+                    throw new Error(
+                        'the tunnel stopped. An old cloudflared may no longer be supported, try "docker pull cloudflare/cloudflared".',
+                    );
                 }
             }
             if (interrupted) url = null;
@@ -467,17 +472,14 @@ async function reachesPublicly(url, ended) {
         } catch {
             // not resolvable or reachable yet.
         }
-        await Promise.race([sleep(2000), ended]);
+        await Promise.race([wait(2000), ended]);
     }
     return false;
 }
 
 /**
- * Whether the tunnel's process has exited.
+ * A sleep that doesn't keep ABR running once the share stopped.
  */
-async function isDone(tunnel) {
-    return Promise.race([
-        tunnel.exited.then(() => true),
-        sleep(0).then(() => false),
-    ]);
+function wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms).unref());
 }

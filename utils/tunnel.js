@@ -18,7 +18,7 @@ export const tunnelImage = 'cloudflare/cloudflared:latest';
  * Starts a quick tunnel to `http://127.0.0.1:<port>`, in the host's network.
  * The container is created before it starts, so {@link stopTunnel} always finds it by name.
  *
- * @returns {Promise<{name: string, subprocess: object, url: Promise<string>, exited: Promise<void>}>}
+ * @returns {Promise<{name: string, subprocess: object, url: Promise<string>, exited: Promise<void>, done: boolean}>}
  * `url` resolves once Cloudflare is connected, rejects if the tunnel exits first or takes over a minute.
  */
 export async function startTunnel(port) {
@@ -54,7 +54,11 @@ export async function startTunnel(port) {
     const url = waitForUrl(subprocess);
     // may reject after the caller stopped waiting, e.g. on Ctrl+C.
     url.catch(() => {});
-    return { name, subprocess, url, exited: subprocess.then(() => {}) };
+    const tunnel = { name, subprocess, url, done: false };
+    tunnel.exited = subprocess.then(() => {
+        tunnel.done = true;
+    });
+    return tunnel;
 }
 
 /**

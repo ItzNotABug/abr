@@ -157,19 +157,6 @@ export function sleepSync(ms) {
 }
 
 /**
- * Whether a process with this pid exists.
- */
-export function isRunning(pid) {
-    try {
-        process.kill(pid, 0);
-        return true;
-    } catch (error) {
-        // exists, but owned by another user, e.g. a `sudo` run.
-        return error.code === 'EPERM';
-    }
-}
-
-/**
  * The shell's exit code for a process ended by `signal`, e.g. 130 for `SIGINT`.
  */
 export function signalExitCode(signal) {

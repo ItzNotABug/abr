@@ -239,7 +239,7 @@ a.download { display: inline-block; padding: 0.5rem 1rem; background: #fd366e; c
 <p>Or via curl, resumable if interrupted, it asks for the password:</p>
 <pre>${escape(curlCommand(share))}</pre>
 <p>Check the download:</p>
-<pre>echo ${escape(quote(`${share.sha256}  ${share.name}`))} | sha256sum -c</pre>
+<pre>echo ${escape(quote(`${share.sha256}  ${share.name}`))} | shasum -a 256 -c</pre>
 <p>The backup is encrypted. Put it in <code>backups/</code> &amp; run <code>abr restore</code>, which asks for its passphrase, or decrypt it via <code>gpg -d ${escape(quote(share.name))} &gt; ${escape(quote(share.name.replace(/\.gpg$/, '')))}</code>.</p>
 </body>
 </html>

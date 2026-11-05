@@ -152,10 +152,15 @@ export async function selectBackup(files, message) {
  * @returns {Promise<string|null>} `null` with the reason printed if the variable is unusable.
  */
 export async function readPassphrase(confirm = false) {
+    // GPG reads up to the first line break & tools may trim the ends, either would make backups undecryptable.
+    const invalid = (passphrase) =>
+        /[\r\n]/.test(passphrase) || passphrase.trim() !== passphrase;
     const variable = process.env.ABR_GPG_PASSPHRASE;
-    if (variable && /[\r\n]/.test(variable)) {
+    if (variable && invalid(variable)) {
         console.log(
-            chalk.red('❌ ABR_GPG_PASSPHRASE must not contain line breaks.'),
+            chalk.red(
+                '❌ ABR_GPG_PASSPHRASE must not contain line breaks or start or end with spaces.',
+            ),
         );
         return null;
     }
@@ -170,7 +175,8 @@ export async function readPassphrase(confirm = false) {
                     message,
                     mask: '*',
                     validate: (input) =>
-                        input.length > 0 || 'The passphrase cannot be empty.',
+                        (input.length > 0 && !invalid(input)) ||
+                        'The passphrase cannot be empty or start or end with spaces.',
                 },
             ])
         ).passphrase;

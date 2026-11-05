@@ -2,13 +2,7 @@ import * as fs from 'fs';
 import chalk from 'chalk';
 import * as path from 'path';
 import loading from 'loading-cli';
-import {
-    checkDocker,
-    handleInterrupts,
-    helperImage,
-    pullImages,
-    signalExitCode,
-} from '../utils/misc.js';
+import { handleInterrupts, signalExitCode } from '../utils/misc.js';
 import {
     hashFile,
     isEncrypted,
@@ -23,12 +17,9 @@ import {
     stopServer,
 } from '../utils/share-server.js';
 import {
-    reachesLocalhost,
-    removeLeftoverTunnels,
+    prepareCloudflared,
     startTunnel,
     stopTunnel,
-    stopTunnelSync,
-    tunnelImage,
 } from '../utils/tunnel.js';
 import { formatSize } from '../utils/volumes.js';
 
@@ -84,12 +75,7 @@ export default class Share {
             return;
         }
 
-        if (!(await checkDocker(loader))) {
-            process.exitCode = 1;
-            return;
-        }
-
-        // no lock: backups & restores never change existing archives.
+        // no Docker needed, nor a lock: backups & restores never change existing archives.
         const file = await this.#selectEncryptedBackup();
         const prepared = file && (await this.#prepare(file));
         if (!prepared) {
@@ -177,15 +163,7 @@ export default class Share {
                 });
             const [sha256] = await Promise.all([
                 stopOnFailure(hashFile(file, controller.signal)),
-                stopOnFailure(
-                    Promise.all([
-                        removeLeftoverTunnels(),
-                        pullImages(
-                            [helperImage, tunnelImage],
-                            controller.signal,
-                        ),
-                    ]),
-                ),
+                stopOnFailure(prepareCloudflared()),
             ]);
             loader.stop();
             return { sha256, size: fs.statSync(file).size };
@@ -217,7 +195,7 @@ export default class Share {
         const release = handleInterrupts((name) => {
             loader.stop();
             if (interrupted) {
-                if (tunnel) stopTunnelSync(tunnel);
+                tunnel?.stop();
                 process.exit(signalExitCode(name));
             }
             interrupted = name;
@@ -229,15 +207,6 @@ export default class Share {
 
             loader.start(chalk.blue('Starting the tunnel...'));
             const { port } = server.address();
-            if (
-                !(await reachesLocalhost(
-                    `http://127.0.0.1:${port}/${share.probe}`,
-                ))
-            ) {
-                throw new Error(
-                    "containers in the host's network can't reach ABR, e.g. with rootless Docker or Docker Desktop. Sharing needs host networking.",
-                );
-            }
 
             // trycloudflare's API times out at times & tunnels may drop right after connecting, a new one usually works.
             // the link is printed once it opens, or after a minute: this machine's DNS may cache the new name's absence.
@@ -254,7 +223,7 @@ export default class Share {
                 }
                 if (interrupted) break;
 
-                tunnel = await startTunnel(port);
+                tunnel = startTunnel(port);
                 // the share stopping or the tunnel exiting ends the waits below.
                 const ended = Promise.race([stopped, tunnel.exited]);
                 try {
@@ -268,8 +237,7 @@ export default class Share {
                 } catch (error) {
                     url = null;
                     if (attempt === attempts) {
-                        error.message +=
-                            ' An old cloudflared may no longer be supported, try "docker pull cloudflare/cloudflared".';
+                        error.message += '';
                         throw error;
                     }
                     continue;
@@ -279,9 +247,7 @@ export default class Share {
                 if (url !== null && !tunnel.done) break;
                 url = null;
                 if (attempt === attempts) {
-                    throw new Error(
-                        'the tunnel stopped. An old cloudflared may no longer be supported, try "docker pull cloudflare/cloudflared".',
-                    );
+                    throw new Error('the tunnel stopped.');
                 }
             }
             if (interrupted) url = null;
@@ -299,7 +265,10 @@ export default class Share {
                     );
                 }
                 // the tunnel ending early stops the share too.
-                tunnel.exited.then(() => stop('tunnel'));
+                // after expiry it may end while downloads finish, which is no failure.
+                tunnel.exited.then(() =>
+                    stop(share.expired ? 'expired' : 'tunnel'),
+                );
                 timer = startCountdown(share, () => stop('expired'));
             }
             reason = await stopped;

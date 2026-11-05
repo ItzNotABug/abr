@@ -1,4 +1,4 @@
-import { docker, helperArgs } from '../misc.js';
+import { docker, dockerSync, helperArgs } from '../misc.js';
 
 export const name = 'MongoDB';
 
@@ -32,7 +32,7 @@ export const files = ['mongo-entrypoint.sh', 'mongo-init.js'];
  */
 export async function snapshot(database, snapshot, signal) {
     // not cancelled, an interrupted call may still lock.
-    await mongosh(database.container, 'db.fsyncLock()');
+    await docker(mongosh(database.container, 'db.fsyncLock()'));
     try {
         signal.throwIfAborted();
         await docker(
@@ -56,15 +56,32 @@ export async function snapshot(database, snapshot, signal) {
         );
     } finally {
         // a lock left behind blocks Appwrite's writes.
-        await mongosh(database.container, 'db.fsyncUnlock()');
+        const { failed, stderr } = await docker(
+            mongosh(database.container, 'db.fsyncUnlock()'),
+            { reject: false },
+        );
+        if (failed) {
+            throw new Error(
+                `could not unlock MongoDB, Appwrite's writes wait until "db.fsyncUnlock()" is run in its mongosh. ${stderr?.trim() ?? ''}`,
+            );
+        }
     }
 }
 
 /**
- * Runs `script` in the database container's `mongosh` as root, with the credentials of its environment.
+ * Unlocks the database on a forced exit, which skips {@link snapshot}'s own unlock.
+ */
+export function releaseSync(database) {
+    dockerSync(mongosh(database.container, 'db.fsyncUnlock()'), {
+        reject: false,
+    });
+}
+
+/**
+ * `docker` arguments running `script` in the database container's `mongosh` as root, with the credentials of its environment.
  */
 function mongosh(container, script) {
-    return docker([
+    return [
         'exec',
         container,
         'sh',
@@ -72,5 +89,5 @@ function mongosh(container, script) {
         'mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "$1"',
         'sh',
         script,
-    ]);
+    ];
 }

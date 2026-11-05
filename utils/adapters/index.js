@@ -12,6 +12,7 @@ import * as mongodb from './mongodb.js';
 
 /**
  * Supported databases by `_APP_DB_ADAPTER`, each with its `name`, `volume`, compose service `image`, `dataDir`, install `files` & `snapshot`.
+ * MongoDB's also has `releaseSync`, as its snapshot locks the live database.
  */
 export const adapters = { mariadb, mongodb };
 

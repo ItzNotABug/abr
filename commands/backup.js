@@ -272,8 +272,10 @@ export default class Backup {
         const release = handleInterrupts((name) => {
             loader.stop();
             if (interrupted) {
-                if (snapshot) removeSnapshotSync(snapshot, archive);
-                else dockerSync(['rm', '-f', archive], { reject: false });
+                if (snapshot) {
+                    database.adapter.releaseSync?.(database);
+                    removeSnapshotSync(snapshot, archive);
+                } else dockerSync(['rm', '-f', archive], { reject: false });
                 removePathSync(partialFile(file));
                 // offen's plain archive, if it got no passphrase.
                 if (passphrase) {

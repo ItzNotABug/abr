@@ -20,9 +20,7 @@ import {
     movePath,
     newBackupFile,
     partialFile,
-    passphraseFile,
     readPassphrase,
-    removeLeftoverPassphrases,
     removePath,
     removePathSync,
     warnPartialArchives,
@@ -85,7 +83,6 @@ export default class Backup {
         }
         await warnLeftoverSnapshots();
         warnPartialArchives();
-        await removeLeftoverPassphrases();
 
         const compose = await readBackupCompose();
         if (!compose) {
@@ -276,8 +273,6 @@ export default class Backup {
                 if (snapshot) removeMariaDBSnapshotSync(snapshot, archive);
                 else dockerSync(['rm', '-f', archive], { reject: false });
                 removePathSync(partialFile(file));
-                // offen's plain archive, if it couldn't read the passphrase.
-                removePathSync(partialFile(file).replace(/\.gpg$/, ''));
                 stack.command?.kill();
                 this.#warnAppwriteDown(stack);
                 const down = stack.stopped || stack.paused;
@@ -465,11 +460,9 @@ export default class Backup {
     }) {
         // a truncated archive would be listed by restore, so it's only moved to its final name once complete.
         const partial = partialFile(file);
-        let secret = null;
 
         try {
             loader.start('Starting backup process...');
-            secret = passphrase && passphraseFile(passphrase);
             await docker(
                 helperArgs({
                     entrypoint: 'backup',
@@ -485,17 +478,18 @@ export default class Backup {
                                 `${path.join(appwriteDir(), file)}:/backup/appwrite/${file}`,
                         ),
                         `${path.dirname(file)}:/archive`,
-                        ...(secret?.mount ? [secret.mount] : []),
                     ],
                     // offen appends `.gpg` to encrypted archives.
+                    // the passphrase via stdin, as env `docker inspect` would show it.
                     env: [
                         `BACKUP_FILENAME=${path.basename(partial).replace(/\.gpg$/, '')}`,
-                        ...(secret
-                            ? [`GPG_PASSPHRASE_FILE=${secret.path}`]
+                        ...(passphrase
+                            ? ['GPG_PASSPHRASE_FILE=/dev/stdin']
                             : []),
                     ],
+                    extra: passphrase ? ['-i'] : [],
                 }),
-                { cancelSignal: signal },
+                { cancelSignal: signal, input: passphrase || undefined },
             );
             loader.stop();
         } catch (error) {
@@ -512,21 +506,12 @@ export default class Backup {
             );
             process.exitCode = 1;
             return false;
-        } finally {
-            secret?.remove();
         }
 
-        // offen writes a plain archive when it can't read the passphrase, so never keep that as encrypted.
+        // offen writes a plain archive without a passphrase, never keep that as encrypted.
         if (passphrase && !fs.existsSync(partial)) {
-            const plain = partial.replace(/\.gpg$/, '');
-            const removed = await removePath(plain);
-            console.log(
-                chalk.red(
-                    removed
-                        ? '❌ The archive was not encrypted, it was removed. Docker may not read files in backups/.'
-                        : `❌ The archive was not encrypted & could not be removed, remove "${plain}".`,
-                ),
-            );
+            await removePath(partial.replace(/\.gpg$/, ''));
+            console.log(chalk.red('❌ The archive was not encrypted.'));
             process.exitCode = 1;
             return false;
         }

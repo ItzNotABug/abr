@@ -352,7 +352,8 @@ function printStopped(reason) {
         process.exitCode = 1;
     } else if (reason) {
         console.log(chalk.yellow('⚠️  Sharing stopped.'));
-        process.exitCode = signalExitCode(reason);
+        // Ctrl+C is the normal way to stop sharing early.
+        if (reason !== 'SIGINT') process.exitCode = signalExitCode(reason);
     }
 }
 

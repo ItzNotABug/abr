@@ -18,17 +18,33 @@ import {
 } from '../utils/misc.js';
 import {
     isEncrypted,
-    passphraseFile,
-    removeLeftoverPassphrases,
     listBackups,
     readPassphrase,
     removePath,
     selectBackup,
 } from '../utils/archives.js';
 import { cacheVolumes, readCompose } from '../utils/compose.js';
+import { existingVolumes } from '../utils/volumes.js';
 import { acquireLock } from '../utils/lock.js';
 
 const loader = loading('');
+
+/**
+ * Volume names of default Appwrite installs, past & present, to also find unlabelled volumes of earlier restores.
+ */
+const defaultVolumes = [
+    'builds',
+    'cache',
+    'certificates',
+    'config',
+    'executor',
+    'functions',
+    'imports',
+    'mariadb',
+    'redis',
+    'sites',
+    'uploads',
+].map((name) => `appwrite_appwrite-${name}`);
 
 /**
  * Extracts archives. GNU tar, busybox's ignores the PAX headers of files over 8 GB.
@@ -41,14 +57,14 @@ const extractorImage = 'debian:stable-slim';
 const decryptorImage = 'buildpack-deps:stable-curl';
 
 /**
- * Shell function writing the archive `/archive/$1` to stdout, decrypted via `$ABR_GPG_PASSPHRASE_FILE` if encrypted.
+ * Shell function writing the archive `/archive/$1` to stdout, decrypted if encrypted, with the passphrase from stdin.
  * A wrong passphrase or a tampered archive fails it, after the data was read: callers need `pipefail`.
  */
 const archiveReader = [
     'set -o pipefail',
     'archive() {',
     '  case "$1" in',
-    '    *.gpg) gpg --batch --quiet --no-symkey-cache --pinentry-mode loopback --passphrase-file "$ABR_GPG_PASSPHRASE_FILE" --decrypt "/archive/$1" ;;',
+    '    *.gpg) gpg --batch --quiet --no-symkey-cache --pinentry-mode loopback --passphrase-fd 0 --decrypt "/archive/$1" ;;',
     '    *) cat "/archive/$1" ;;',
     '  esac',
     '}',
@@ -79,7 +95,6 @@ export default class Restore {
             process.exitCode = 1;
             return;
         }
-        await removeLeftoverPassphrases();
 
         // exits via `process.exit` to release the lock, attached docker commands get the same Ctrl+C.
         for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']) {
@@ -126,24 +141,19 @@ export default class Restore {
             return;
         }
 
-        // one passphrase file for listing & extracting, removed however the restore ends.
-        let secret = null;
         let restored = false;
         try {
-            secret = passphrase ? passphraseFile(passphrase) : null;
             const volumes =
                 (await this.#pullImages(file)) &&
-                (await this.#readArchive(file, secret));
+                (await this.#readArchive(file, passphrase));
             restored =
                 Boolean(volumes) &&
                 (await this.#removeRemnants(volumes)) &&
-                (await this.#extractArchive(file, volumes, secret));
+                (await this.#extractArchive(file, volumes, passphrase));
         } catch (error) {
             // Ctrl+C at a prompt, handled in index.js.
             if (error.name === 'ExitPromptError') throw error;
             console.log(chalk.red('❌ Could not restore:'), error.message);
-        } finally {
-            secret?.remove();
         }
 
         if (!restored) {
@@ -165,10 +175,10 @@ export default class Restore {
     /**
      * Reads the whole archive, which also checks its compression & encryption.
      *
-     * @param secret from {@link passphraseFile}, for encrypted archives.
+     * @param passphrase decrypts the archive, if encrypted.
      * @returns {Promise<string[]|null>} the volumes in it, `null` with the reason printed if it's unusable.
      */
-    static async #readArchive(file, secret) {
+    static async #readArchive(file, passphrase) {
         loader.start(chalk.blue('Checking the backup...'));
 
         const volumes = new Set();
@@ -185,10 +195,9 @@ export default class Restore {
                 this.#archiveScriptArgs(
                     file,
                     [`${path.dirname(file)}:/archive:ro`],
-                    secret,
                     'archive "$1" | tar -tvzP --quoting-style=c --numeric-owner -f -',
                 ),
-                { buffer: { stdout: false } },
+                { buffer: { stdout: false }, input: passphrase || undefined },
             );
             for await (const line of listing) {
                 const [, type, quoted] = line.match(entry) ?? [];
@@ -415,15 +424,19 @@ export default class Restore {
 
         const list = async (args) =>
             (await docker(args)).stdout.split('\n').filter(Boolean);
-        // volumes created by restores have no compose labels, so also the ones the install & backup name.
+        // volumes created by restores have no compose labels, so also the ones the install, backup & older installs name.
         // not every `appwrite_appwrite-*` volume, e.g. a manual copy of one.
-        const known = new Set([...(compose?.volumes ?? []), ...volumes]);
-        const [containers, projectVolumes, allVolumes] = await Promise.all([
+        const [containers, projectVolumes, namedVolumes] = await Promise.all([
             list(['ps', '-a', '--filter', filter, '--format', '{{.Names}}']),
             list(['volume', 'ls', '--filter', filter, '--format', '{{.Name}}']),
-            list(['volume', 'ls', '--format', '{{.Name}}']),
+            existingVolumes([
+                ...new Set([
+                    ...defaultVolumes,
+                    ...(compose?.volumes ?? []),
+                    ...volumes,
+                ]),
+            ]),
         ]);
-        const namedVolumes = allVolumes.filter((volume) => known.has(volume));
 
         const volumeNames = [
             ...new Set([...projectVolumes, ...namedVolumes]),
@@ -459,7 +472,7 @@ export default class Restore {
     /**
      * Extracts the archive straight into the volumes & the `appwrite` folder, as root to keep file owners.
      */
-    static async #extractArchive(file, volumes, secret) {
+    static async #extractArchive(file, volumes, passphrase) {
         this.#phase = 'changing';
         loader.start(chalk.blue('Restoring volumes...'));
 
@@ -486,10 +499,10 @@ export default class Restore {
                         `${appwriteDir()}:/restore/backup/appwrite`,
                         `${path.dirname(file)}:/archive:ro`,
                     ],
-                    secret,
                     'archive "$1" | tar -xz -f - -C /restore --numeric-owner && if [ -n "$2" ]; then chown -R "$2" /restore/backup/appwrite; fi',
                     owner,
                 ),
+                { input: passphrase || undefined },
             );
             loader.stop();
         } catch (error) {
@@ -514,22 +527,17 @@ export default class Restore {
 
     /**
      * `docker run` arguments for a `script` reading the archive via `archive "$1"`, other `args` follow as `$2`...
-     *
-     * @param secret from {@link passphraseFile}, for encrypted archives.
+     * Encrypted archives read the passphrase from stdin, as env `docker inspect` would show it.
      */
-    static #archiveScriptArgs(file, mounts, secret, script, ...args) {
+    static #archiveScriptArgs(file, mounts, script, ...args) {
         return helperArgs(
             {
                 entrypoint: 'bash',
                 image: this.#extractor(file),
-                mounts: [...mounts, ...(secret?.mount ? [secret.mount] : [])],
+                mounts,
                 // escaped bytes for non-ASCII names in listings, whatever the image's locale.
-                env: [
-                    'LANG=C',
-                    ...(secret
-                        ? [`ABR_GPG_PASSPHRASE_FILE=${secret.path}`]
-                        : []),
-                ],
+                env: ['LANG=C'],
+                extra: isEncrypted(file) ? ['-i'] : [],
             },
             '-c',
             `${archiveReader}\n${script}`,

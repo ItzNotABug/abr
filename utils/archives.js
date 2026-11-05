@@ -1,6 +1,5 @@
 import * as fs from 'fs';
 import chalk from 'chalk';
-import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import inquirer from 'inquirer';
@@ -209,68 +208,6 @@ export function warnPartialArchives() {
             `⚠️  Found unfinished archives from interrupted backups in backups/, remove them unless one was reported complete: ${partials.join(', ')}.`,
         ),
     );
-}
-
-/**
- * Removes passphrase files left in `backups/` by killed runs, they'd be copied along with the archives.
- * Only call while holding the lock.
- */
-export async function removeLeftoverPassphrases() {
-    const leftovers = fs.existsSync(backupsDir())
-        ? fs
-              .readdirSync(backupsDir())
-              .filter((name) => name.startsWith('.abr-passphrase-'))
-        : [];
-    for (const leftover of leftovers) {
-        if (!(await removePath(path.join(backupsDir(), leftover)))) {
-            console.log(
-                chalk.red(
-                    `❌ Could not remove "${leftover}" in backups/, it holds a backup passphrase. Remove it.`,
-                ),
-            );
-        }
-    }
-}
-
-/**
- * Writes the passphrase to a file only this user can read, to mount into containers. As env, `docker inspect` would show it.
- * In `backups/`, which containers reading or writing archives mount at `/archive` already: Docker may not see the temp folder.
- * A temp folder, mounted itself, if `backups/` isn't writable, e.g. root-owned.
- *
- * @returns {{path: string, mount: string|null, remove: () => void}} `path` is the file inside the container, `mount` extra.
- */
-export function passphraseFile(passphrase) {
-    let dir;
-    let mount = null;
-    let inside;
-    try {
-        dir = fs.mkdtempSync(path.join(backupsDir(), '.abr-passphrase-'));
-        inside = `/archive/${path.basename(dir)}`;
-    } catch {
-        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'abr-passphrase-'));
-        mount = `${dir}:/run/abr:ro`;
-        inside = '/run/abr';
-    }
-
-    const remove = () => fs.rmSync(dir, { recursive: true, force: true });
-    // also on a forced exit.
-    process.once('exit', remove);
-    try {
-        fs.writeFileSync(path.join(dir, 'passphrase'), passphrase, {
-            mode: 0o600,
-        });
-    } catch (error) {
-        remove();
-        throw error;
-    }
-    return {
-        path: `${inside}/passphrase`,
-        mount,
-        remove: () => {
-            process.off('exit', remove);
-            remove();
-        },
-    };
 }
 
 /**

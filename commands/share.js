@@ -2,7 +2,8 @@ import * as fs from 'fs';
 import chalk from 'chalk';
 import * as path from 'path';
 import loading from 'loading-cli';
-import { handleInterrupts, signalExitCode, sleep } from '../utils/misc.js';
+import { setTimeout as wait } from 'timers/promises';
+import { handleInterrupts, signalExitCode } from '../utils/misc.js';
 import {
     hashFile,
     isEncrypted,
@@ -179,7 +180,7 @@ export default class Share {
     /**
      * Serves the file on localhost, exposed by a quick tunnel, until it expires or is interrupted.
      *
-     * @param lifetime of the link, from when it works.
+     * @param lifetime of the link, from when the tunnel is up.
      */
     static async #share(share, password, lifetime) {
         let server;
@@ -207,7 +208,7 @@ export default class Share {
             loader.start(chalk.blue('Starting the tunnel...'));
             const { port } = server.address();
 
-            // trycloudflare's API times out at times & tunnels may drop right after connecting, a new one usually works.
+            // trycloudflare's API times out at times, a new tunnel usually works.
             const attempts = 5;
             let url = null;
             for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -216,7 +217,11 @@ export default class Share {
                     loader.text = chalk.blue(
                         `Starting the tunnel, attempt ${attempt} of ${attempts}...`,
                     );
-                    await Promise.race([sleep(2000), stopped]);
+                    // unref'd, to exit at once when stopped meanwhile.
+                    await Promise.race([
+                        wait(2000 * (attempt - 1), undefined, { ref: false }),
+                        stopped,
+                    ]);
                 }
                 if (interrupted) break;
 

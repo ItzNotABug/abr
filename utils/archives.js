@@ -26,7 +26,7 @@ export function isEncrypted(file) {
 }
 
 /**
- * Returns the path for a new backup archive.
+ * Returns an unused path for a new backup archive.
  */
 export function newBackupFile(encrypted = false) {
     // created by ABR, `docker run -v` would create it as root.
@@ -35,10 +35,18 @@ export function newBackupFile(encrypted = false) {
         .toISOString()
         .slice(0, 19)
         .replaceAll(':', '-');
-    return path.join(
-        backupsDir(),
-        `backup-${timestamp}${extensions[encrypted ? 1 : 0]}`,
-    );
+    const name = (suffix, extension) =>
+        path.join(backupsDir(), `backup-${timestamp}${suffix}${extension}`);
+    // a name is taken by either extension, so plain & encrypted backups never share one.
+    const taken = (suffix) =>
+        extensions.some((extension) => {
+            const file = name(suffix, extension);
+            return fs.existsSync(file) || fs.existsSync(partialFile(file));
+        });
+
+    let suffix = '';
+    for (let i = 1; taken(suffix); i++) suffix = `-${i}`;
+    return name(suffix, extensions[encrypted ? 1 : 0]);
 }
 
 /**
@@ -72,14 +80,20 @@ export function startsAsOpenPGP(file) {
  */
 export function listBackups() {
     if (!fs.existsSync(backupsDir())) return [];
-    return fs
-        .readdirSync(backupsDir())
-        .filter(
-            (file) =>
-                file.startsWith('backup-') &&
-                extensions.some((extension) => file.endsWith(extension)),
-        )
-        .sort();
+    return (
+        fs
+            .readdirSync(backupsDir())
+            .filter(
+                (file) =>
+                    file.startsWith('backup-') &&
+                    extensions.some((extension) => file.endsWith(extension)),
+            )
+            // by name without extensions, `-1` collision suffixes sort before `.` otherwise.
+            .sort((a, b) => {
+                const base = (file) => file.replace(/\.tar\.gz(\.gpg)?$/, '');
+                return base(a).localeCompare(base(b), 'en', { numeric: true });
+            })
+    );
 }
 
 /**

@@ -15,6 +15,7 @@ import {
     helperArgs,
     installFiles,
     printError,
+    pullImage,
     runCompose,
     signalExitCode,
 } from '../utils/misc.js';
@@ -125,6 +126,10 @@ export default class Restore {
 
         let restored = false;
         try {
+            loader.start(chalk.blue('Preparing the restore...'));
+            await pullImage(archiveImage);
+            loader.stop();
+
             const backup = await this.#readArchive(file, passphrase);
             restored =
                 Boolean(backup) &&
@@ -220,8 +225,6 @@ export default class Restore {
             loader.stop();
         } catch (error) {
             loader.stop();
-            // docker's own failure, e.g. pulling the image, says nothing about the archive.
-            if (error.exitCode === 125) throw error;
             if (/bad session key/i.test(error.stderr ?? '')) {
                 console.log(
                     chalk.red(
@@ -378,7 +381,7 @@ export default class Restore {
     }
 
     /**
-     * The install's containers & volumes by its compose project, plus the volumes the backup restores.
+     * The install's containers by its compose project, Appwrite's volumes of it, plus the volumes the backup restores.
      * Volumes list the `users` outside the install that would block their removal.
      * Cache volumes, which aren't backed up, are kept unless the backup has them.
      */
@@ -502,8 +505,7 @@ export default class Restore {
                 entrypoint: 'bash',
                 image: archiveImage,
                 mounts,
-                // quiet, a pull's progress would end up in the errors printed from stderr.
-                extra: ['--quiet', ...(isEncrypted(file) ? ['-i'] : [])],
+                extra: isEncrypted(file) ? ['-i'] : [],
             },
             '-c',
             `${archiveReader}\n${script}`,

@@ -169,6 +169,16 @@ export function dockerSync(args) {
 }
 
 /**
+ * Pulls the image if it isn't present yet. Throws on failure.
+ */
+export async function pullImage(image) {
+    const { failed } = await docker(['image', 'inspect', image], {
+        reject: false,
+    });
+    if (failed) await docker(['pull', image]);
+}
+
+/**
  * Prints an error under `title`, with docker's own words if it came from a command.
  */
 export function printError(title, error) {
@@ -289,7 +299,7 @@ export async function runCompose(
         loader.stop();
         if (harmless && error.message.includes(harmless)) return true;
 
-        console.error(chalk.red(`❌ ${failed}`), error.message);
+        printError(failed, error);
         process.exitCode = 1;
         return false;
     }

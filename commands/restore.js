@@ -31,6 +31,14 @@ import { acquireLock } from '../utils/lock.js';
 const loader = loading('');
 
 /**
+ * Files restores accept in the `appwrite` folder, the install files of any database.
+ */
+const appwriteFiles = [
+    ...installFiles,
+    ...Object.values(adapters).flatMap(({ files }) => files),
+];
+
+/**
  * Extracts archives. GNU tar, busybox's ignores the PAX headers of files over 8 GB.
  */
 const extractorImage = 'debian:stable-slim';
@@ -167,7 +175,7 @@ export default class Restore {
         loader.start(chalk.blue('Checking the backup...'));
 
         const volumes = new Set();
-        const appwriteFiles = new Set();
+        const files = new Set();
         const unexpected = new Set();
         // names become `docker run -v` sources & are removed first, so only Appwrite's own volumes.
         // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
@@ -206,14 +214,14 @@ export default class Restore {
                 } else if (!dir) {
                     continue;
                 } else if (dir === 'appwrite') {
-                    // bind-mounted to the host & read by compose, ABR only writes the two files there.
+                    // bind-mounted to the host & read by compose, ABR only writes the install files there.
                     if (parts.length === 2) continue;
                     if (
                         type === '-' &&
                         parts.length === 3 &&
-                        installFiles.includes(parts[2])
+                        appwriteFiles.includes(parts[2])
                     ) {
-                        appwriteFiles.add(parts[2]);
+                        files.add(parts[2]);
                     } else {
                         unexpected.add(name);
                     }
@@ -254,9 +262,15 @@ export default class Restore {
             return null;
         }
 
-        const missing = [...installFiles, adapters.mariadb.volume].filter(
-            (name) => !appwriteFiles.has(name) && !volumes.has(name),
-        );
+        // the backed up install's database, by its volume.
+        const adapter =
+            Object.values(adapters).find(({ volume }) => volumes.has(volume)) ??
+            adapters.mariadb;
+        const missing = [
+            ...installFiles,
+            ...adapter.files,
+            adapter.volume,
+        ].filter((name) => !files.has(name) && !volumes.has(name));
         if (missing.length) {
             console.log(
                 chalk.red(`❌ The backup is missing ${missing.join(' & ')}.`),

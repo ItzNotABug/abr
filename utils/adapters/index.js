@@ -8,11 +8,12 @@ import {
     sleepSync,
 } from '../misc.js';
 import * as mariadb from './mariadb.js';
+import * as mongodb from './mongodb.js';
 
 /**
- * Supported databases by `_APP_DB_ADAPTER`, each with its `name`, `volume`, compose service `image`, `dataDir` & `snapshot`.
+ * Supported databases by `_APP_DB_ADAPTER`, each with its `name`, `volume`, compose service `image`, `dataDir`, install `files` & `snapshot`.
  */
-export const adapters = { mariadb };
+export const adapters = { mariadb, mongodb };
 
 /**
  * Returns the database container's `status`, `image` id & `env`, or `null` if it doesn't exist.

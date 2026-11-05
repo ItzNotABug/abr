@@ -324,6 +324,7 @@ export default class Backup {
 
             archived = await this.#archiveVolumes({
                 volumes,
+                files: [...installFiles, ...database.adapter.files],
                 replace: snapshot && { [database.volume]: snapshot },
                 archive,
                 file,
@@ -447,6 +448,7 @@ export default class Backup {
      * Archives the volumes.
      *
      * @param options.volumes volumes to archive.
+     * @param options.files files to archive from the `appwrite` folder.
      * @param options.replace volumes to archive from another volume, e.g. the database's snapshot.
      * @param options.archive name for the archive container, to stop it on failure or interrupt.
      * @param options.file path of the archive to create.
@@ -457,6 +459,7 @@ export default class Backup {
      */
     static async #archiveVolumes({
         volumes,
+        files,
         replace,
         archive,
         file,
@@ -481,9 +484,9 @@ export default class Backup {
                             (volume) =>
                                 `${replace?.[volume] ?? volume}:/backup/${volume}`,
                         ),
-                        ...installFiles.map(
-                            (file) =>
-                                `${path.join(appwriteDir(), file)}:/backup/appwrite/${file}`,
+                        ...files.map(
+                            (name) =>
+                                `${path.join(appwriteDir(), name)}:/backup/appwrite/${name}`,
                         ),
                         `${path.dirname(file)}:/archive`,
                     ],

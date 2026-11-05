@@ -12,7 +12,6 @@ import {
     docker,
     helperArgs,
     installFiles,
-    mariadbVolume,
     pullImages,
     restartAppwriteStack,
     signalExitCode,
@@ -24,6 +23,7 @@ import {
     removePath,
     selectBackup,
 } from '../utils/archives.js';
+import { adapters } from '../utils/adapters/index.js';
 import { cacheVolumes, readCompose } from '../utils/compose.js';
 import { existingVolumes } from '../utils/volumes.js';
 import { acquireLock } from '../utils/lock.js';
@@ -254,7 +254,7 @@ export default class Restore {
             return null;
         }
 
-        const missing = [...installFiles, mariadbVolume].filter(
+        const missing = [...installFiles, adapters.mariadb.volume].filter(
             (name) => !appwriteFiles.has(name) && !volumes.has(name),
         );
         if (missing.length) {

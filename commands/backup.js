@@ -28,15 +28,15 @@ import {
 import { readBackupCompose } from '../utils/compose.js';
 import { acquireLock } from '../utils/lock.js';
 import {
-    inspectMariaDB,
-    isMariaDBVolumeUsedByOthers,
-    listMariaDBFiles,
-    removeMariaDBSnapshot,
-    removeMariaDBSnapshotSync,
-    snapshotMariaDB,
+    inspectDatabase,
+    isVolumeUsedByOthers,
+    listDatabaseFiles,
+    removeSnapshot,
+    removeSnapshotSync,
+    snapshotDatabase,
     snapshotName,
     warnLeftoverSnapshots,
-} from '../utils/mariadb.js';
+} from '../utils/adapters/index.js';
 import {
     checkDiskSpace,
     existingVolumes,
@@ -89,7 +89,8 @@ export default class Backup {
             process.exitCode = 1;
             return;
         }
-        const { mariadb } = compose;
+        const { database } = compose;
+        const { name } = database.adapter;
 
         console.log('\n');
 
@@ -127,8 +128,8 @@ export default class Backup {
         let measure;
         try {
             volumes = await existingVolumes(compose.volumes);
-            if (volumes.includes(mariadb.volume)) {
-                measure = await measureVolumes(volumes, mariadb.volume);
+            if (volumes.includes(database.volume)) {
+                measure = await measureVolumes(volumes, database.volume);
             }
             loader.stop();
         } catch (error) {
@@ -140,10 +141,10 @@ export default class Backup {
             process.exitCode = 1;
             return;
         }
-        if (!volumes.includes(mariadb.volume)) {
+        if (!volumes.includes(database.volume)) {
             console.log(
                 chalk.red(
-                    `❌ MariaDB's volume "${mariadb.volume}" does not exist.`,
+                    `❌ ${name}'s volume "${database.volume}" does not exist.`,
                 ),
             );
             process.exitCode = 1;
@@ -152,7 +153,7 @@ export default class Backup {
 
         printVolumeSizes(measure, compose.volumes, compose.excluded);
 
-        await this.#performBackup(mariadb, volumes, measure, passphrase);
+        await this.#performBackup(database, volumes, measure, passphrase);
         this.#backupType = '';
     }
 
@@ -181,13 +182,14 @@ export default class Backup {
     /**
      * Performs the backup of appwrite volumes.
      *
-     * @param mariadb MariaDB's `container` & `volume` names.
+     * @param database the database's `adapter`, `container` & `volume` names.
      * @param volumes the existing Appwrite volumes.
      * @param measure volume sizes & free disk space, from {@link measureVolumes}.
      * @param passphrase encrypts the archive, if any.
      */
-    static async #performBackup(mariadb, volumes, measure, passphrase) {
-        // hot backups keep Appwrite running, a live copy of MariaDB's files would be torn, so snapshot it first.
+    static async #performBackup(database, volumes, measure, passphrase) {
+        const { name } = database.adapter;
+        // hot backups keep Appwrite running, a live copy of the database's files would be torn, so snapshot it first.
         // files are copied after it: new uploads become orphans, deleted ones may be missing.
         let snapshotted = false;
         let state = null;
@@ -196,12 +198,12 @@ export default class Backup {
             let usedByOthers;
             try {
                 [state, usedByOthers] = await Promise.all([
-                    inspectMariaDB(mariadb.container),
-                    isMariaDBVolumeUsedByOthers(mariadb),
+                    inspectDatabase(database.container),
+                    isVolumeUsedByOthers(database),
                 ]);
             } catch (error) {
                 console.log(
-                    chalk.red('❌ Could not inspect MariaDB:'),
+                    chalk.red(`❌ Could not inspect ${name}:`),
                     error.message,
                 );
                 process.exitCode = 1;
@@ -217,7 +219,7 @@ export default class Backup {
             } else if (stopped.includes(status) && !usedByOthers) {
                 console.log(
                     chalk.yellow(
-                        `⚠️  MariaDB is ${status}, copying its volume as is.`,
+                        `⚠️  ${name} is ${status}, copying its volume as is.`,
                     ),
                 );
                 asIs = true;
@@ -227,7 +229,7 @@ export default class Backup {
                     : `it is ${status}`;
                 console.log(
                     chalk.red(
-                        `❌ Cannot back up MariaDB, ${reason}. Try a semi-hot or cold backup instead.`,
+                        `❌ Cannot back up ${name}, ${reason}. Try a semi-hot or cold backup instead.`,
                     ),
                 );
                 process.exitCode = 1;
@@ -237,14 +239,14 @@ export default class Backup {
 
         const space = checkDiskSpace(
             measure,
-            mariadb.volume,
+            database.volume,
             snapshotted,
             Boolean(passphrase),
         );
         if (space === 'snapshot') {
             console.log(
                 chalk.red(
-                    '❌ Not enough disk space in Docker’s storage for the MariaDB snapshot & its compressed copy.',
+                    `❌ Not enough disk space in Docker’s storage for the ${name} snapshot & its compressed copy.`,
                 ),
             );
             process.exitCode = 1;
@@ -270,7 +272,7 @@ export default class Backup {
         const release = handleInterrupts((name) => {
             loader.stop();
             if (interrupted) {
-                if (snapshot) removeMariaDBSnapshotSync(snapshot, archive);
+                if (snapshot) removeSnapshotSync(snapshot, archive);
                 else dockerSync(['rm', '-f', archive], { reject: false });
                 removePathSync(partialFile(file));
                 // offen's plain archive, if it got no passphrase.
@@ -291,9 +293,9 @@ export default class Backup {
         try {
             if (
                 snapshot &&
-                !(await snapshotMariaDB(
+                !(await snapshotDatabase(
                     loader,
-                    { ...mariadb, ...state },
+                    { ...database, ...state },
                     snapshot,
                     signal,
                 ))
@@ -308,10 +310,10 @@ export default class Backup {
             let files = null;
             if (asIs) {
                 try {
-                    files = await listMariaDBFiles(mariadb);
+                    files = await listDatabaseFiles(database);
                 } catch (error) {
                     console.log(
-                        chalk.red('❌ Could not list MariaDB’s files:'),
+                        chalk.red(`❌ Could not list ${name}’s files:`),
                         error.stderr?.trim() || error.message,
                     );
                     process.exitCode = 1;
@@ -322,17 +324,17 @@ export default class Backup {
 
             archived = await this.#archiveVolumes({
                 volumes,
-                replace: snapshot && { [mariadb.volume]: snapshot },
+                replace: snapshot && { [database.volume]: snapshot },
                 archive,
                 file,
                 passphrase,
                 signal,
                 verify:
                     files !== null &&
-                    (async () => (await listMariaDBFiles(mariadb)) === files),
+                    (async () => (await listDatabaseFiles(database)) === files),
             });
         } finally {
-            if (snapshot) await removeMariaDBSnapshot(snapshot, archive);
+            if (snapshot) await removeSnapshot(snapshot, archive);
             const track = (command) => (stack.command = command);
             if (stack.stopped) {
                 stack.stopped = !(await restartAppwriteStack(loader, track));
@@ -445,7 +447,7 @@ export default class Backup {
      * Archives the volumes.
      *
      * @param options.volumes volumes to archive.
-     * @param options.replace volumes to archive from another volume, e.g. MariaDB's snapshot.
+     * @param options.replace volumes to archive from another volume, e.g. the database's snapshot.
      * @param options.archive name for the archive container, to stop it on failure or interrupt.
      * @param options.file path of the archive to create.
      * @param options.passphrase encrypts the archive via GPG, if any.
@@ -569,7 +571,7 @@ export default class Backup {
             if (await verify()) return true;
         } catch (error) {
             console.log(
-                chalk.red('❌ Could not check MariaDB’s files:'),
+                chalk.red('❌ Could not check the database’s files:'),
                 error.stderr?.trim() || error.message,
             );
             return false;
@@ -577,7 +579,7 @@ export default class Backup {
 
         console.log(
             chalk.red(
-                '❌ MariaDB wrote to its volume during the backup, the copy may be torn and was removed. Try again or use a cold backup.',
+                '❌ The database wrote to its volume during the backup, the copy may be torn and was removed. Try again or use a cold backup.',
             ),
         );
         return false;

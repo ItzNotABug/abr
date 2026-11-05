@@ -11,8 +11,8 @@ import * as mariadb from './mariadb.js';
 import * as mongodb from './mongodb.js';
 
 /**
- * Supported databases by `_APP_DB_ADAPTER`, each with its `name`, `volume`, compose service `image`, `dataDir`, install `files` & `snapshot`.
- * MongoDB's also has `releaseSync`, as its snapshot locks the live database.
+ * Supported databases by `_APP_DB_ADAPTER`, each with its `name`, `volume`, compose service `image`, `dataDir`, `skipped` files & `snapshot`.
+ * MongoDB's snapshot is a dump, restored via its `dumpFile` & `restoreDump`.
  */
 export const adapters = { mariadb, mongodb };
 
@@ -159,9 +159,12 @@ export async function snapshotDatabase(loader, database, snapshot, signal) {
  * Removes the snapshot container & volume, warns if the volume is left behind.
  *
  * Also stops the given `containers`, e.g. an archive container still using the volume.
+ * `-v` removes their anonymous volumes too, e.g. of the database image's `VOLUME`s.
  */
 export async function removeSnapshot(snapshot, ...containers) {
-    await docker(['rm', '-f', snapshot, ...containers], { reject: false });
+    await docker(['rm', '-f', '-v', snapshot, ...containers], {
+        reject: false,
+    });
 
     // stays in use briefly while an interrupted sidecar is torn down.
     for (let attempt = 0; attempt < 10; attempt++) {
@@ -179,7 +182,9 @@ export async function removeSnapshot(snapshot, ...containers) {
  * {@link removeSnapshot} for a forced exit.
  */
 export function removeSnapshotSync(snapshot, ...containers) {
-    dockerSync(['rm', '-f', snapshot, ...containers], { reject: false });
+    dockerSync(['rm', '-f', '-v', snapshot, ...containers], {
+        reject: false,
+    });
 
     for (let attempt = 0; attempt < 10; attempt++) {
         const { exitCode } = dockerSync(['volume', 'rm', '-f', snapshot], {

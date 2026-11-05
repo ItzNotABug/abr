@@ -129,7 +129,11 @@ export default class Backup {
         try {
             volumes = await existingVolumes(compose.volumes);
             if (volumes.includes(database.volume)) {
-                measure = await measureVolumes(volumes, database.volume);
+                measure = await measureVolumes(
+                    volumes,
+                    database.volume,
+                    database.adapter.skipped,
+                );
             }
             loader.stop();
         } catch (error) {
@@ -272,10 +276,8 @@ export default class Backup {
         const release = handleInterrupts((name) => {
             loader.stop();
             if (interrupted) {
-                if (snapshot) {
-                    database.adapter.releaseSync?.(database);
-                    removeSnapshotSync(snapshot, archive);
-                } else dockerSync(['rm', '-f', archive], { reject: false });
+                if (snapshot) removeSnapshotSync(snapshot, archive);
+                else dockerSync(['rm', '-f', archive], { reject: false });
                 removePathSync(partialFile(file));
                 // offen's plain archive, if it got no passphrase.
                 if (passphrase) {
@@ -326,7 +328,7 @@ export default class Backup {
 
             archived = await this.#archiveVolumes({
                 volumes,
-                files: [...installFiles, ...database.adapter.files],
+                files: [...installFiles, ...database.files],
                 replace: snapshot && { [database.volume]: snapshot },
                 archive,
                 file,

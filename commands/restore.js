@@ -31,14 +31,6 @@ import { acquireLock } from '../utils/lock.js';
 const loader = loading('');
 
 /**
- * Files restores accept in the `appwrite` folder, the install files of any database.
- */
-const appwriteFiles = [
-    ...installFiles,
-    ...Object.values(adapters).flatMap(({ files }) => files),
-];
-
-/**
  * Extracts archives. GNU tar, busybox's ignores the PAX headers of files over 8 GB.
  */
 const extractorImage = 'debian:stable-slim';
@@ -136,13 +128,21 @@ export default class Restore {
 
         let restored = false;
         try {
-            const volumes =
+            const backup =
                 (await this.#pullImages(file)) &&
                 (await this.#readArchive(file, passphrase));
             restored =
-                Boolean(volumes) &&
-                (await this.#removeRemnants(volumes, this.#extractor(file))) &&
-                (await this.#extractArchive(file, volumes, passphrase));
+                Boolean(backup) &&
+                (await this.#removeRemnants(
+                    backup.volumes,
+                    this.#extractor(file),
+                )) &&
+                (await this.#extractArchive(
+                    file,
+                    backup.volumes,
+                    passphrase,
+                )) &&
+                (!backup.dumped || (await this.#restoreDump(backup.adapter)));
         } catch (error) {
             // Ctrl+C at a prompt, handled in index.js.
             if (error.name === 'ExitPromptError') throw error;
@@ -169,14 +169,19 @@ export default class Restore {
      * Reads the whole archive, which also checks its compression & encryption.
      *
      * @param passphrase decrypts the archive, if encrypted.
-     * @returns {Promise<string[]|null>} the volumes in it, `null` with the reason printed if it's unusable.
+     * @returns {Promise<{volumes: string[], adapter: object, dumped: boolean}|null>} the volumes in it, its install's database
+     * & whether that's a dump, `null` with the reason printed if it's unusable.
      */
     static async #readArchive(file, passphrase) {
         loader.start(chalk.blue('Checking the backup...'));
 
         const volumes = new Set();
         const files = new Set();
+        // a volume's top-level files, e.g. a dump in place of the database's files.
+        const volumeFiles = new Set();
         const unexpected = new Set();
+        // the archived `.env`'s name, as stored.
+        let env;
         // names become `docker run -v` sources & are removed first, so only Appwrite's own volumes.
         // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
         // numeric owners, so a crafted user name can't look like the quoted name.
@@ -214,19 +219,18 @@ export default class Restore {
                 } else if (!dir) {
                     continue;
                 } else if (dir === 'appwrite') {
-                    // bind-mounted to the host & read by compose, ABR only writes the install files there.
+                    // bind-mounted to the host & read by compose, ABR only writes install files there, no folders.
                     if (parts.length === 2) continue;
-                    if (
-                        type === '-' &&
-                        parts.length === 3 &&
-                        appwriteFiles.includes(parts[2])
-                    ) {
+                    if (type === '-' && parts.length === 3) {
                         files.add(parts[2]);
+                        if (parts[2] === '.env') env = name;
                     } else {
                         unexpected.add(name);
                     }
                 } else if (appwriteVolumeName.test(dir)) {
                     volumes.add(dir);
+                    if (parts.length === 3)
+                        volumeFiles.add(`${dir}/${parts[2]}`);
                 } else {
                     unexpected.add(`backup/${dir}`);
                 }
@@ -262,15 +266,7 @@ export default class Restore {
             return null;
         }
 
-        // the backed up install's database, by its volume.
-        const adapter =
-            Object.values(adapters).find(({ volume }) => volumes.has(volume)) ??
-            adapters.mariadb;
-        const missing = [
-            ...installFiles,
-            ...adapter.files,
-            adapter.volume,
-        ].filter((name) => !files.has(name) && !volumes.has(name));
+        const missing = installFiles.filter((name) => !files.has(name));
         if (missing.length) {
             console.log(
                 chalk.red(`❌ The backup is missing ${missing.join(' & ')}.`),
@@ -278,8 +274,81 @@ export default class Restore {
             return null;
         }
 
+        // the backed up install's database, as its `.env` sets it. installs before 1.9 always run MariaDB.
+        let setting;
+        try {
+            setting =
+                (await this.#readEnvSetting(file, env, passphrase)) ??
+                'mariadb';
+        } catch (error) {
+            console.log(
+                chalk.red('❌ Could not read the backup’s .env:'),
+                error.stderr?.trim() || error.message,
+            );
+            return null;
+        }
+        const adapter = Object.hasOwn(adapters, setting)
+            ? adapters[setting]
+            : null;
+        if (!adapter) {
+            console.log(
+                chalk.red(
+                    `❌ The backup's database "${setting}" is unsupported.`,
+                ),
+            );
+            return null;
+        }
+        if (!volumes.has(adapter.volume)) {
+            console.log(
+                chalk.red(`❌ The backup is missing ${adapter.volume}.`),
+            );
+            return null;
+        }
+
         console.log(chalk.green('✅ Backup checked.'));
-        return [...volumes];
+        return {
+            volumes: [...volumes],
+            adapter,
+            dumped: volumeFiles.has(`${adapter.volume}/${adapter.dumpFile}`),
+        };
+    }
+
+    /**
+     * Reads `_APP_DB_ADAPTER` from the archived `.env`, stored as `env`. `undefined` if unset.
+     */
+    static async #readEnvSetting(file, env, passphrase) {
+        // stops at the `.env`, near the start. no pipefail, as decryption then fails on the closed pipe.
+        const { stdout } = await docker(
+            this.#archiveScriptArgs(
+                file,
+                [`${path.dirname(file)}:/archive:ro`],
+                'set +o pipefail\narchive_tar "$1" -xzOP --occurrence=1 "$2"',
+                env,
+            ),
+            { input: passphrase || undefined },
+        );
+        return stdout.match(/^_APP_DB_ADAPTER=(["']?)(\w+)\1\s*$/m)?.[2];
+    }
+
+    /**
+     * Loads the database dump of a hot backup, after it was extracted. Appwrite's other services stay stopped.
+     */
+    static async #restoreDump(adapter) {
+        loader.start(chalk.blue(`Restoring the ${adapter.name} dump...`));
+        try {
+            await adapter.restoreDump();
+            loader.stop();
+        } catch (error) {
+            loader.stop();
+            console.error(
+                chalk.red(`❌ Error restoring the ${adapter.name} dump:`),
+                error.stderr?.trim() || error.message,
+            );
+            return false;
+        }
+
+        console.log(chalk.green(`✅ ${adapter.name} dump restored.`));
+        return true;
     }
 
     /**
@@ -373,7 +442,8 @@ export default class Restore {
         try {
             const containers = names('Container');
             if (containers.length) {
-                await docker(['rm', '-f', ...containers]);
+                // with their anonymous volumes, e.g. of MongoDB's image `VOLUME`s.
+                await docker(['rm', '-f', '-v', ...containers]);
             }
             const volumeNames = names('Volume');
             if (volumeNames.length) {

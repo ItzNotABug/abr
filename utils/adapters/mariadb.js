@@ -18,9 +18,9 @@ export const image = /(^|\/)mariadb(:|@|$)/;
 export const dataDir = '/var/lib/mysql';
 
 /**
- * Install files the database's service mounts from the `appwrite` folder, archived with it.
+ * Files in the volume that snapshots skip: temp & redo logs, rebuilt by `--prepare`.
  */
-export const files = [];
+export const skipped = ['ibtmp1', 'ib_logfile*'];
 
 /**
  * Snapshots the running MariaDB into the `snapshot` volume via `mariadb-backup`, `--prepare`d so it restores like a plain volume.

@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import * as path from 'path';
 import { adapters } from './adapters/index.js';
 import { appwriteDir, appwriteVolumeName, docker } from './misc.js';
 
@@ -11,8 +12,9 @@ export const cacheVolumes = ['appwrite-models'];
 /**
  * Reads the Appwrite install's compose config, resolved by compose itself: `.env`, shell overrides, quoting & comments.
  *
- * @returns {Promise<{project: string, adapter: string, database: {adapter: object, container: string, volume: string|undefined}|null, volumes: string[], excluded: string[], others: string[]}>}
- * `database` is the service of a supported `adapter`, see {@link adapters}.
+ * @returns {Promise<{project: string, database: {adapter: object|null, container: string|undefined, volume: string|undefined, files: string[]}, volumes: string[], excluded: string[], others: string[]}>}
+ * `database` is the service of the `_APP_DB_ADAPTER`, its `adapter` from {@link adapters} or `null` if unsupported.
+ * Its `files` are the ones it mounts from the `appwrite` folder, archived with it.
  * `volumes` are Appwrite's volumes to back up, `excluded` its caches & `others` volumes added to the install, neither backed up.
  * @throws when compose fails or prints something unexpected.
  */
@@ -36,29 +38,36 @@ export async function readCompose() {
         services
             .map(([, service]) => service.environment?._APP_DB_ADAPTER)
             .find(Boolean) ?? 'mariadb';
-    const adapter = adapters[name];
+    const adapter = Object.hasOwn(adapters, name) ? adapters[name] : null;
     const [key, service] =
         (adapter &&
             services.find(([, service]) =>
                 adapter.image.test(service.image ?? ''),
             )) ??
         [];
-    const source = service?.volumes?.find(
+    const mounts = service?.volumes ?? [];
+    const source = mounts.find(
         (volume) =>
             volume.type === 'volume' && volume.target === adapter.dataDir,
     )?.source;
 
     return {
         project: config.name,
-        adapter: name,
-        database: service
-            ? {
-                  adapter,
-                  container:
-                      service.container_name ?? `${config.name}-${key}-1`,
-                  volume: source && (config.volumes?.[source]?.name ?? source),
-              }
-            : null,
+        database: {
+            adapter,
+            container:
+                service &&
+                (service.container_name ?? `${config.name}-${key}-1`),
+            volume: source && (config.volumes?.[source]?.name ?? source),
+            // e.g. MongoDB's entrypoint & init script.
+            files: mounts
+                .filter(
+                    (mount) =>
+                        mount.type === 'bind' &&
+                        path.dirname(mount.source) === appwriteDir(),
+                )
+                .map((mount) => path.basename(mount.source)),
+        },
         volumes: names(false),
         excluded: names(true),
         others: named
@@ -82,11 +91,11 @@ export async function readBackupCompose() {
         return null;
     }
 
-    const adapter = adapters[compose.adapter];
+    const { adapter } = compose.database;
     if (!adapter) {
         console.error(
             chalk.red(
-                `❌ Unsupported database: ${compose.adapter}. Only ${Object.values(
+                `❌ Unsupported database, see _APP_DB_ADAPTER. Only ${Object.values(
                     adapters,
                 )
                     .map(({ name }) => name)
@@ -97,10 +106,10 @@ export async function readBackupCompose() {
     }
 
     // e.g. a bind mount or a renamed volume, which restores wouldn't bring back.
-    if (compose.database?.volume !== adapter.volume) {
+    if (compose.database.volume !== adapter.volume) {
         console.error(
             chalk.red(
-                `❌ Unsupported ${adapter.name} data volume: ${compose.database?.volume ?? 'none'}. Expected "${adapter.volume}".`,
+                `❌ Unsupported ${adapter.name} data volume: ${compose.database.volume ?? 'none'}. Expected "${adapter.volume}".`,
             ),
         );
         return null;

@@ -138,10 +138,7 @@ export default class Share {
                 ),
             );
         } catch (error) {
-            console.log(
-                chalk.red(`❌ Could not read ${path.basename(file)}:`),
-                error.message,
-            );
+            printError(`Could not read ${path.basename(file)}:`, error);
         }
         return null;
     }
@@ -243,10 +240,7 @@ export default class Share {
             if (interrupted) {
                 reason = interrupted;
             } else {
-                console.log(
-                    chalk.red('❌ Could not share the backup:'),
-                    error.message,
-                );
+                printError('Could not share the backup:', error);
                 process.exitCode = 1;
             }
         } finally {

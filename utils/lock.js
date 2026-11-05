@@ -18,7 +18,7 @@ export function acquireLock() {
         // connections are closed right away, they would keep ABR from exiting.
         const server = net.createServer((socket) => socket.destroy());
         server.once('error', (error) => {
-            console.error(
+            console.log(
                 chalk.red(
                     error.code === 'EADDRINUSE'
                         ? `❌ Another ABR run is in progress (port ${lockPort} on 127.0.0.1 is in use).`

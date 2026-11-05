@@ -40,5 +40,8 @@
     "Appwrite Backup",
     "Appwrite Restore",
     "Appwrite Backup Restore"
-  ]
+  ],
+  "optionalDependencies": {
+    "cloudflared": "^0.7.3"
+  }
 }

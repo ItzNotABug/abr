@@ -6,22 +6,27 @@ import inquirer from 'inquirer';
 import loading from 'loading-cli';
 import {
     appwriteDir,
-    appwriteVolumes,
     checkDocker,
+    appwriteVolumeName,
+    defaultVolumes,
     docker,
     helperArgs,
     installFiles,
+    mariadbVolume,
+    pullImages,
     restartAppwriteStack,
     signalExitCode,
 } from '../utils/misc.js';
 import {
-    backupFilePattern,
-    backupsDir,
+    isEncrypted,
+    listBackups,
+    readPassphrase,
     removePath,
+    selectBackup,
 } from '../utils/archives.js';
-import { readCompose } from '../utils/compose.js';
-import { acquireLock } from '../utils/lock.js';
+import { cacheVolumes, readCompose } from '../utils/compose.js';
 import { existingVolumes } from '../utils/volumes.js';
+import { acquireLock } from '../utils/lock.js';
 
 const loader = loading('');
 
@@ -31,9 +36,24 @@ const loader = loading('');
 const extractorImage = 'debian:stable-slim';
 
 /**
- * MariaDB's volume in supported installs, a backup without it can't be restored.
+ * Extracts encrypted archives, the extractor's GNU tar plus GPG.
  */
-const mariadbVolume = 'appwrite_appwrite-mariadb';
+const decryptorImage = 'buildpack-deps:stable-curl';
+
+/**
+ * Shell function running tar with the given arguments on the archive `/archive/$1`.
+ * Encrypted ones are decrypted on the way, with the passphrase from stdin.
+ * A wrong passphrase or a tampered archive fails it, after the data was read: callers need `pipefail`.
+ */
+const archiveReader = [
+    'set -o pipefail',
+    'archive_tar() {',
+    '  case "$1" in',
+    '    *.gpg) gpg --batch --quiet --no-symkey-cache --pinentry-mode loopback --passphrase-fd 0 --decrypt "/archive/$1" | tar "${@:2}" -f - ;;',
+    '    *) tar "${@:2}" -f "/archive/$1" ;;',
+    '  esac',
+    '}',
+].join('\n');
 
 export default class Restore {
     // `checking`, then `changing` the install, which an interrupt leaves incomplete, then `restarting`.
@@ -95,16 +115,33 @@ export default class Restore {
         }
 
         // the archive is checked before anything is removed.
-        const file = await this.#selectBackup();
-        const volumes =
-            file &&
-            (await this.#pullExtractor()) &&
-            (await this.#readArchive(file));
-        if (
-            !volumes ||
-            !(await this.#removeRemnants(volumes)) ||
-            !(await this.#extractArchive(file, volumes))
-        ) {
+        const file = await selectBackup(
+            listBackups(),
+            'Select a backup file to restore:',
+        );
+        const passphrase =
+            file && isEncrypted(file) ? await readPassphrase() : '';
+        if (!file || passphrase === null) {
+            process.exitCode = 1;
+            return;
+        }
+
+        let restored = false;
+        try {
+            const volumes =
+                (await this.#pullImages(file)) &&
+                (await this.#readArchive(file, passphrase));
+            restored =
+                Boolean(volumes) &&
+                (await this.#removeRemnants(volumes, this.#extractor(file))) &&
+                (await this.#extractArchive(file, volumes, passphrase));
+        } catch (error) {
+            // Ctrl+C at a prompt, handled in index.js.
+            if (error.name === 'ExitPromptError') throw error;
+            console.log(chalk.red('❌ Could not restore:'), error.message);
+        }
+
+        if (!restored) {
             if (this.#phase === 'changing') {
                 console.log(
                     chalk.yellow(
@@ -121,81 +158,18 @@ export default class Restore {
     }
 
     /**
-     * Select a backup from a list of available backups, if any.
-     */
-    static async #selectBackup() {
-        if (!fs.existsSync(backupsDir())) {
-            console.log(chalk.red('❌ No backups directory found.'));
-            return null;
-        }
-
-        const files = fs
-            .readdirSync(backupsDir())
-            .filter(
-                (file) =>
-                    file.startsWith('backup-') && file.endsWith('.tar.gz'),
-            );
-
-        if (files.length === 0) {
-            console.log(chalk.red('❌ No backup files found.'));
-            return null;
-        }
-
-        const backups = files.map((file) => {
-            const dateMatch = file.match(backupFilePattern);
-            if (!dateMatch) {
-                return { name: file, displayDate: 'Unknown' };
-            }
-
-            const [, year, month, day, hour, minute] = dateMatch;
-
-            const hourInt = parseInt(hour, 10);
-            const period = hourInt >= 12 ? 'PM' : 'AM';
-            const formattedHour = ((hourInt + 11) % 12) + 1; // Convert to 12-hour format
-            const formattedDate = `${day}/${month}/${year} @ ${formattedHour}:${minute} ${period}`;
-
-            return { name: file, displayDate: formattedDate };
-        });
-
-        console.log('\n');
-
-        let selectedBackup;
-
-        while (!selectedBackup || selectedBackup.length === 0) {
-            const response = await inquirer.prompt([
-                {
-                    type: 'checkbox',
-                    name: 'selectedBackup',
-                    message: 'Select a backup file to restore:',
-                    choices: backups.map((b) => ({
-                        name: `${b.name} (${b.displayDate})`,
-                        value: b.name,
-                    })),
-                    validate: (input) =>
-                        input.length > 0 ||
-                        'Please select at least one backup file.',
-                },
-            ]);
-
-            selectedBackup = response.selectedBackup;
-        }
-
-        return path.join(backupsDir(), selectedBackup[0]);
-    }
-
-    /**
-     * Reads the whole archive, which also checks its compression.
+     * Reads the whole archive, which also checks its compression & encryption.
      *
+     * @param passphrase decrypts the archive, if encrypted.
      * @returns {Promise<string[]|null>} the volumes in it, `null` with the reason printed if it's unusable.
      */
-    static async #readArchive(file) {
+    static async #readArchive(file, passphrase) {
         loader.start(chalk.blue('Checking the backup...'));
 
         const volumes = new Set();
         const appwriteFiles = new Set();
         const unexpected = new Set();
-        // names become `docker run -v` sources & are removed first, so only the supported project's volumes.
-        const volumeName = /^appwrite_appwrite-[a-z0-9-]+$/;
+        // names become `docker run -v` sources & are removed first, so only Appwrite's own volumes.
         // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
         // numeric owners, so a crafted user name can't look like the quoted name.
         const entry =
@@ -203,20 +177,12 @@ export default class Restore {
         try {
             // with the extractor's tar, which reads it the same way. streamed, archives can hold millions of files.
             const listing = docker(
-                helperArgs(
-                    {
-                        entrypoint: 'tar',
-                        image: extractorImage,
-                        mounts: [`${path.dirname(file)}:/archive:ro`],
-                        // escaped bytes for non-ASCII names, whatever the image's locale.
-                        env: ['LANG=C'],
-                    },
-                    '-tvzPf',
-                    `/archive/${path.basename(file)}`,
-                    '--quoting-style=c',
-                    '--numeric-owner',
+                this.#archiveScriptArgs(
+                    file,
+                    [`${path.dirname(file)}:/archive:ro`],
+                    'archive_tar "$1" -tvzP --quoting-style=c --numeric-owner',
                 ),
-                { buffer: { stdout: false } },
+                { buffer: { stdout: false }, input: passphrase || undefined },
             );
             for await (const line of listing) {
                 const [, type, quoted] = line.match(entry) ?? [];
@@ -251,7 +217,7 @@ export default class Restore {
                     } else {
                         unexpected.add(name);
                     }
-                } else if (volumeName.test(dir)) {
+                } else if (appwriteVolumeName.test(dir)) {
                     volumes.add(dir);
                 } else {
                     unexpected.add(`backup/${dir}`);
@@ -260,6 +226,14 @@ export default class Restore {
             loader.stop();
         } catch (error) {
             loader.stop();
+            if (/bad session key/i.test(error.stderr ?? '')) {
+                console.log(
+                    chalk.red(
+                        `❌ Wrong passphrase for the backup${process.env.ABR_GPG_PASSPHRASE ? ', from ABR_GPG_PASSPHRASE' : ''}.`,
+                    ),
+                );
+                return null;
+            }
             console.log(
                 chalk.red('❌ The backup is unreadable or incomplete:'),
                 error.stderr?.trim() || error.message,
@@ -295,22 +269,18 @@ export default class Restore {
     }
 
     /**
-     * Pulls the extractor, before anything is removed.
+     * Pulls the image restoring the archive needs, before anything is removed.
      */
-    static async #pullExtractor() {
+    static async #pullImages(file) {
         loader.start(chalk.blue('Preparing the restore...'));
         try {
-            const { failed } = await docker(
-                ['image', 'inspect', extractorImage],
-                { reject: false },
-            );
-            if (failed) await docker(['pull', extractorImage]);
+            await pullImages([this.#extractor(file)]);
             loader.stop();
             return true;
         } catch (error) {
             loader.stop();
             console.log(
-                chalk.red(`❌ Could not pull ${extractorImage}:`),
+                chalk.red('❌ Could not pull the images to restore with:'),
                 error.stderr?.trim() || error.message,
             );
             return false;
@@ -320,9 +290,10 @@ export default class Restore {
     /**
      * Removes the install's containers & volumes, the volumes the backup restores & the `appwrite` folder, once confirmed.
      *
+     * @param image already pulled, for root fallbacks.
      * @returns {Promise<boolean>} `false` if declined or failed.
      */
-    static async #removeRemnants(volumes) {
+    static async #removeRemnants(volumes, image) {
         let remnants;
         try {
             remnants = await this.#findRemnants(volumes);
@@ -371,7 +342,8 @@ export default class Restore {
                 name: 'shouldDelete',
                 message:
                     'Appwrite remnants detected. Do you want to remove them for a clean installation?',
-                default: true,
+                // a restore replaces the install, so only on an explicit yes.
+                default: false,
             },
         ]);
         if (!shouldDelete) {
@@ -394,7 +366,7 @@ export default class Restore {
                 await docker(['volume', 'rm', '-f', ...volumeNames]);
             }
             // e.g. root-owned, as created by Appwrite's installer.
-            if (!(await removePath(appwriteDir(), extractorImage))) {
+            if (!(await removePath(appwriteDir(), image))) {
                 throw new Error(`could not remove ${appwriteDir()}.`);
             }
         } catch (error) {
@@ -412,23 +384,54 @@ export default class Restore {
     /**
      * The install's containers & volumes by its compose project, plus the volumes the backup restores.
      * Volumes list the `users` outside the install that would block their removal.
+     * Cache volumes, which aren't backed up, are kept unless the backup has them.
      */
     static async #findRemnants(volumes) {
-        const project = fs.existsSync(appwriteDir())
-            ? ((await readCompose().catch(() => null))?.project ?? 'appwrite')
-            : 'appwrite';
+        const compose = fs.existsSync(appwriteDir())
+            ? await readCompose().catch(() => null)
+            : null;
+        const project = compose?.project ?? 'appwrite';
         const filter = `label=com.docker.compose.project=${project}`;
+        // reused only under the default project, restores bring the install back as `appwrite`.
+        // the default caches too, the current compose may predate them.
+        const kept = (
+            project !== 'appwrite'
+                ? []
+                : [
+                      ...new Set([
+                          ...(compose?.excluded ?? []),
+                          ...cacheVolumes.map((key) => `${project}_${key}`),
+                      ]),
+                  ]
+        ).filter((volume) => !volumes.includes(volume));
 
         const list = async (args) =>
             (await docker(args)).stdout.split('\n').filter(Boolean);
-        // volumes created by restores have no compose labels, so also by name.
+        // volumes created by restores have no compose labels, so also the ones the install, backup & older installs name.
+        // not every `appwrite_appwrite-*` volume, e.g. a manual copy of one.
         const [containers, projectVolumes, namedVolumes] = await Promise.all([
             list(['ps', '-a', '--filter', filter, '--format', '{{.Names}}']),
             list(['volume', 'ls', '--filter', filter, '--format', '{{.Name}}']),
-            existingVolumes([...new Set([...appwriteVolumes, ...volumes])]),
+            existingVolumes([
+                ...new Set([
+                    ...defaultVolumes,
+                    ...(compose?.volumes ?? []),
+                    ...volumes,
+                ]),
+            ]),
         ]);
 
-        const volumeNames = [...new Set([...projectVolumes, ...namedVolumes])];
+        // only Appwrite's own: other volumes of the project aren't backed up, removing them would lose them.
+        const volumeNames = [
+            ...new Set([
+                ...projectVolumes.filter(
+                    (volume) =>
+                        appwriteVolumeName.test(volume) ||
+                        volume.startsWith(`${project}_appwrite-`),
+                ),
+                ...namedVolumes,
+            ]),
+        ].filter((volume) => !kept.includes(volume));
         const users = await Promise.all(
             volumeNames.map(async (volume) =>
                 (
@@ -460,7 +463,7 @@ export default class Restore {
     /**
      * Extracts the archive straight into the volumes & the `appwrite` folder, as root to keep file owners.
      */
-    static async #extractArchive(file, volumes) {
+    static async #extractArchive(file, volumes, passphrase) {
         this.#phase = 'changing';
         loader.start(chalk.blue('Restoring volumes...'));
 
@@ -478,25 +481,19 @@ export default class Restore {
         try {
             // docker creates the missing `appwrite` folder, as root.
             await docker(
-                helperArgs(
-                    {
-                        entrypoint: 'sh',
-                        image: extractorImage,
-                        mounts: [
-                            ...volumes.map(
-                                (volume) =>
-                                    `${volume}:/restore/backup/${volume}`,
-                            ),
-                            `${appwriteDir()}:/restore/backup/appwrite`,
-                            `${path.dirname(file)}:/archive:ro`,
-                        ],
-                    },
-                    '-c',
-                    'tar -xzf "/archive/$1" -C /restore --numeric-owner && if [ -n "$2" ]; then chown -R "$2" /restore/backup/appwrite; fi',
-                    'sh',
-                    path.basename(file),
+                this.#archiveScriptArgs(
+                    file,
+                    [
+                        ...volumes.map(
+                            (volume) => `${volume}:/restore/backup/${volume}`,
+                        ),
+                        `${appwriteDir()}:/restore/backup/appwrite`,
+                        `${path.dirname(file)}:/archive:ro`,
+                    ],
+                    'archive_tar "$1" -xz -C /restore --numeric-owner && if [ -n "$2" ]; then chown -R "$2" /restore/backup/appwrite; fi',
                     owner,
                 ),
+                { input: passphrase || undefined },
             );
             loader.stop();
         } catch (error) {
@@ -510,6 +507,35 @@ export default class Restore {
 
         console.log(chalk.green('✅ Restoration completed successfully.'));
         return true;
+    }
+
+    /**
+     * The image to read the archive with.
+     */
+    static #extractor(file) {
+        return isEncrypted(file) ? decryptorImage : extractorImage;
+    }
+
+    /**
+     * `docker run` arguments for a `script` reading the archive via `archive_tar "$1" <tar args>`, other `args` follow as `$2`...
+     * Encrypted archives read the passphrase from stdin, as env `docker inspect` would show it.
+     */
+    static #archiveScriptArgs(file, mounts, script, ...args) {
+        return helperArgs(
+            {
+                entrypoint: 'bash',
+                image: this.#extractor(file),
+                mounts,
+                // escaped bytes for non-ASCII names in listings, whatever the image's locale.
+                env: ['LANG=C'],
+                extra: isEncrypted(file) ? ['-i'] : [],
+            },
+            '-c',
+            `${archiveReader}\n${script}`,
+            'bash',
+            path.basename(file),
+            ...args,
+        );
     }
 }
 

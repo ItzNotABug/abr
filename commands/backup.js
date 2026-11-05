@@ -5,22 +5,22 @@ import inquirer from 'inquirer';
 import loading from 'loading-cli';
 import {
     appwriteDir,
-    appwriteVolumes,
     backupTypes,
     checkDocker,
     docker,
     dockerSync,
+    handleInterrupts,
     helperArgs,
     installFiles,
     restartAppwriteStack,
     resumeAppwriteStack,
-    setHandlingInterrupts,
     signalExitCode,
 } from '../utils/misc.js';
 import {
     movePath,
     newBackupFile,
     partialFile,
+    readPassphrase,
     removePath,
     removePathSync,
     warnPartialArchives,
@@ -57,15 +57,20 @@ export default class Backup {
             command: 'backup',
             description:
                 'Backups your Appwrite instance with all volumes and SQL data!',
-            builder: (_) => null,
-            handler: async (_) => await this.#performTask(),
+            builder: (yargs) =>
+                yargs.option('encrypt', {
+                    type: 'boolean',
+                    description:
+                        'Encrypt the backup with a passphrase, from ABR_GPG_PASSPHRASE or a prompt',
+                }),
+            handler: async (argv) => await this.#performTask(argv),
         };
     }
 
     /**
      * Starts task once yargs receives the command.
      */
-    static async #performTask() {
+    static async #performTask({ encrypt }) {
         this.#backupType = '';
 
         if (
@@ -101,12 +106,27 @@ export default class Backup {
             this.#backupType = response.backupType[0];
         }
 
+        if (!encrypt && process.env.ABR_GPG_PASSPHRASE) {
+            console.log(
+                chalk.yellow(
+                    '⚠️  ABR_GPG_PASSPHRASE is set, but the backup is only encrypted with --encrypt.',
+                ),
+            );
+        }
+
+        // asked before Appwrite is stopped or paused.
+        const passphrase = encrypt ? await readPassphrase(true) : null;
+        if (encrypt && !passphrase) {
+            process.exitCode = 1;
+            return;
+        }
+
         // measured after the prompt, the disk check needs current numbers.
         loader.start('Checking volume sizes...');
         let volumes;
         let measure;
         try {
-            volumes = await existingVolumes(appwriteVolumes);
+            volumes = await existingVolumes(compose.volumes);
             if (volumes.includes(mariadb.volume)) {
                 measure = await measureVolumes(volumes, mariadb.volume);
             }
@@ -130,9 +150,9 @@ export default class Backup {
             return;
         }
 
-        printVolumeSizes(measure, appwriteVolumes);
+        printVolumeSizes(measure, compose.volumes, compose.excluded);
 
-        await this.#performBackup(mariadb, volumes, measure);
+        await this.#performBackup(mariadb, volumes, measure, passphrase);
         this.#backupType = '';
     }
 
@@ -164,8 +184,9 @@ export default class Backup {
      * @param mariadb MariaDB's `container` & `volume` names.
      * @param volumes the existing Appwrite volumes.
      * @param measure volume sizes & free disk space, from {@link measureVolumes}.
+     * @param passphrase encrypts the archive, if any.
      */
-    static async #performBackup(mariadb, volumes, measure) {
+    static async #performBackup(mariadb, volumes, measure, passphrase) {
         // hot backups keep Appwrite running, a live copy of MariaDB's files would be torn, so snapshot it first.
         // files are copied after it: new uploads become orphans, deleted ones may be missing.
         let snapshotted = false;
@@ -214,7 +235,12 @@ export default class Backup {
             }
         }
 
-        const space = checkDiskSpace(measure, mariadb.volume, snapshotted);
+        const space = checkDiskSpace(
+            measure,
+            mariadb.volume,
+            snapshotted,
+            Boolean(passphrase),
+        );
         if (space === 'snapshot') {
             console.log(
                 chalk.red(
@@ -232,7 +258,7 @@ export default class Backup {
         const id = Date.now();
         const snapshot = snapshotted ? snapshotName(id) : null;
         const archive = `abr-archive-${id}`;
-        const file = newBackupFile();
+        const file = newBackupFile(Boolean(passphrase));
         // `command` is the running stop, pause or bring back, killed on a forced exit.
         const stack = { stopped: false, paused: false, command: null };
         const controller = new AbortController();
@@ -241,14 +267,16 @@ export default class Backup {
         let interrupted = 0;
 
         // on interrupt, abort & let `finally` clean up & bring Appwrite back. a second one exits right away.
-        // `on`, not `once`: execa's exit hook re-raises the signal if no other listener is left.
-        const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
-        const onInterrupt = (name) => {
+        const release = handleInterrupts((name) => {
             loader.stop();
             if (interrupted) {
                 if (snapshot) removeMariaDBSnapshotSync(snapshot, archive);
                 else dockerSync(['rm', '-f', archive], { reject: false });
                 removePathSync(partialFile(file));
+                // offen's plain archive, if it got no passphrase.
+                if (passphrase) {
+                    removePathSync(partialFile(file).replace(/\.gpg$/, ''));
+                }
                 stack.command?.kill();
                 this.#warnAppwriteDown(stack);
                 const down = stack.stopped || stack.paused;
@@ -258,14 +286,7 @@ export default class Backup {
             }
             interrupted = signalExitCode(name);
             controller.abort();
-        };
-        signals.forEach((name) => process.on(name, onInterrupt));
-        setHandlingInterrupts(true);
-
-        // a hung up terminal (SIGHUP) fails writes with EIO, don't crash before the cleanup.
-        const ignore = () => {};
-        process.stdout.on('error', ignore);
-        process.stderr.on('error', ignore);
+        });
 
         try {
             if (
@@ -304,6 +325,7 @@ export default class Backup {
                 replace: snapshot && { [mariadb.volume]: snapshot },
                 archive,
                 file,
+                passphrase,
                 signal,
                 verify:
                     files !== null &&
@@ -319,17 +341,12 @@ export default class Backup {
                 stack.paused = !(await resumeAppwriteStack(loader, track));
             }
             this.#warnAppwriteDown(stack);
-            setHandlingInterrupts(false);
-            signals.forEach((name) => process.off(name, onInterrupt));
-
             // an interrupt during the final cleanup doesn't undo a finished backup.
             if (interrupted && !archived) {
                 process.exitCode = interrupted;
                 console.log(chalk.yellow('⚠️  Backup interrupted.'));
             }
-
-            process.stdout.off('error', ignore);
-            process.stderr.off('error', ignore);
+            release();
         }
     }
 
@@ -431,6 +448,7 @@ export default class Backup {
      * @param options.replace volumes to archive from another volume, e.g. MariaDB's snapshot.
      * @param options.archive name for the archive container, to stop it on failure or interrupt.
      * @param options.file path of the archive to create.
+     * @param options.passphrase encrypts the archive via GPG, if any.
      * @param options.signal aborts the archiving.
      * @param options.verify checks the archive before it's kept, removed if it returns `false`.
      * @returns {Promise<boolean>} `true` if the archive was created.
@@ -440,11 +458,14 @@ export default class Backup {
         replace,
         archive,
         file,
+        passphrase,
         signal,
         verify,
     }) {
         // a truncated archive would be listed by restore, so it's only moved to its final name once complete.
         const partial = partialFile(file);
+        // offen's name for the archive, before it appends `.gpg`. a plain one, if it got no passphrase.
+        const plain = partial.replace(/\.gpg$/, '');
 
         try {
             loader.start('Starting backup process...');
@@ -464,9 +485,17 @@ export default class Backup {
                         ),
                         `${path.dirname(file)}:/archive`,
                     ],
-                    env: [`BACKUP_FILENAME=${path.basename(partial)}`],
+                    // offen appends `.gpg` to encrypted archives.
+                    // the passphrase via stdin, as env `docker inspect` would show it.
+                    env: [
+                        `BACKUP_FILENAME=${path.basename(plain)}`,
+                        ...(passphrase
+                            ? ['GPG_PASSPHRASE_FILE=/dev/stdin']
+                            : []),
+                    ],
+                    extra: passphrase ? ['-i'] : [],
                 }),
-                { cancelSignal: signal },
+                { cancelSignal: signal, input: passphrase || undefined },
             );
             loader.stop();
         } catch (error) {
@@ -475,11 +504,27 @@ export default class Backup {
             // stop the container first so it can't write again.
             await docker(['rm', '-f', archive], { reject: false });
             await removePath(partial);
+            // offen's plain archive, if it got no passphrase.
+            if (passphrase) await removePath(plain);
             if (signal.aborted) return false;
 
             console.log(
                 chalk.red('❌ Error during backup process:'),
                 error.message,
+            );
+            process.exitCode = 1;
+            return false;
+        }
+
+        // offen writes a plain archive without a passphrase, never keep that as encrypted.
+        if (passphrase && !fs.existsSync(partial)) {
+            const removed = await removePath(plain);
+            console.log(
+                chalk.red(
+                    removed
+                        ? '❌ The archive was not encrypted, it was removed.'
+                        : `❌ The archive was not encrypted, remove "${plain}".`,
+                ),
             );
             process.exitCode = 1;
             return false;

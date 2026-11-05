@@ -34,11 +34,28 @@ npm install -g @itznotabug/abr
 
 2. Run the following command:
     ```shell
-    abr backup | restore # or abr --help
+    abr backup | restore | share # or abr --help
     ```
 
     * Use `abr backup` to create a complete backup of your Appwrite instance.
-    * Use `abr restore` to select a backup file and restore your Appwrite instance.
+    * Use `abr backup --encrypt` to encrypt it with a passphrase, asked for or taken from `ABR_GPG_PASSPHRASE`.
+    * Use `abr restore` to select a backup file and restore your Appwrite instance, encrypted ones ask for their
+      passphrase.
+    * Use `abr share` to share an encrypted backup via a temporary download link, see below.
+
+## Sharing Backups
+
+`abr share` serves an encrypted backup via a [Cloudflare Quick Tunnel](https://try.cloudflare.com), no account or
+domain needed. It prints a link, a random password & the backup's SHA-256, then shows a countdown until the link
+expires, after 15 minutes by default:
+
+```shell
+abr share --expires 1h
+```
+
+The link opens a page with the download & a resumable `curl` command. Press `Ctrl+C` to stop sharing early.
+Only encrypted backups can be shared, Cloudflare can read the traffic through its tunnel. The recipient restores
+it via `abr restore` with the passphrase, or decrypts it via `gpg -d`.
 
 ## Considerations
 

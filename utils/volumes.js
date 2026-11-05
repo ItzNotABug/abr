@@ -82,8 +82,10 @@ export async function measureVolumes(volumes, mariadbVolume) {
 
 /**
  * Prints the volume sizes, `n/a` for the given volumes that don't exist.
+ *
+ * @param excluded volumes listed as not backed up.
  */
-export function printVolumeSizes({ sizes }, volumes) {
+export function printVolumeSizes({ sizes }, volumes, excluded = []) {
     const table = new Table({
         head: [chalk.blue('Volume Name'), chalk.blue('Size')],
         colWidths: [40, 15],
@@ -95,6 +97,9 @@ export function printVolumeSizes({ sizes }, volumes) {
                 ? chalk.green(formatSize(sizes.get(volume)))
                 : chalk.red('n/a'),
         ]),
+    );
+    excluded.forEach((volume) =>
+        table.push([chalk.gray(volume), chalk.gray('excluded')]),
     );
     console.log(table.toString());
 }
@@ -108,9 +113,10 @@ export function printVolumeSizes({ sizes }, volumes) {
  * @param measure from {@link measureVolumes}.
  * @param mariadbVolume MariaDB's volume.
  * @param snapshotted whether MariaDB is snapshotted first, which skips temp & redo log files.
+ * @param encrypted whether the archive is encrypted, offen keeps both copies in its `/tmp` meanwhile.
  * @returns {'ok'|'snapshot'|'archive'} what may not fit.
  */
-export function checkDiskSpace(measure, mariadbVolume, snapshotted) {
+export function checkDiskSpace(measure, mariadbVolume, snapshotted, encrypted) {
     const skipped = snapshotted ? measure.skipped : 0;
     const snapshot = snapshotted
         ? measure.sizes.get(mariadbVolume) - skipped
@@ -137,7 +143,7 @@ export function checkDiskSpace(measure, mariadbVolume, snapshotted) {
     // offen builds the archive in its `/tmp`, then copies it to `backups/`.
     return fits([
         [measure.scratch, snapshot],
-        [measure.tmp, total],
+        [measure.tmp, encrypted ? total * 2 : total],
         [measure.archive, total],
     ])
         ? 'ok'
@@ -173,7 +179,7 @@ function fits(needs) {
     return true;
 }
 
-function formatSize(kb) {
+export function formatSize(kb) {
     const units = ['KB', 'MB', 'GB', 'TB'];
     let size = kb;
     let unit = 0;

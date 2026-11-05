@@ -23,19 +23,31 @@ ${chalk.blue('_'.repeat(146))}
 `;
 
 /**
- * Appwrite docker volumes.
+ * Names of Appwrite's own volumes under the default project, the only ones backups take & restores accept.
  */
-export const appwriteVolumes = [
-    'appwrite_appwrite-redis',
-    'appwrite_appwrite-cache',
-    'appwrite_appwrite-builds',
-    'appwrite_appwrite-config',
-    'appwrite_appwrite-executor',
-    'appwrite_appwrite-mariadb',
-    'appwrite_appwrite-uploads',
-    'appwrite_appwrite-functions',
-    'appwrite_appwrite-certificates',
-];
+export const appwriteVolumeName = /^appwrite_appwrite-[a-z0-9-]+$/;
+
+/**
+ * Volume names of default Appwrite installs, past & present, to also find unlabelled volumes of earlier restores.
+ */
+export const defaultVolumes = [
+    'builds',
+    'cache',
+    'certificates',
+    'config',
+    'executor',
+    'functions',
+    'imports',
+    'mariadb',
+    'redis',
+    'sites',
+    'uploads',
+].map((name) => `appwrite_appwrite-${name}`);
+
+/**
+ * MariaDB's volume in supported installs.
+ */
+export const mariadbVolume = 'appwrite_appwrite-mariadb';
 
 /**
  * Install files archived with the volumes, from the `appwrite` folder.
@@ -103,8 +115,31 @@ let detached = false;
  * While ABR handles interrupts itself, docker commands run in their own process group,
  * so a Ctrl+C reaches only ABR, which then stops or finishes them. Otherwise it stops them too.
  */
-export function setHandlingInterrupts(handling) {
+function setHandlingInterrupts(handling) {
     detached = handling;
+}
+
+/**
+ * Routes interrupts to `onInterrupt(signal)` until the returned `release` is called.
+ * Meanwhile docker commands run detached & write errors of a hung up terminal are ignored.
+ */
+export function handleInterrupts(onInterrupt) {
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
+    // `on`, not `once`: execa's exit hook re-raises the signal if no other listener is left.
+    signals.forEach((name) => process.on(name, onInterrupt));
+    setHandlingInterrupts(true);
+
+    // a hung up terminal (SIGHUP) fails writes with EIO, don't crash before the cleanup.
+    const ignore = () => {};
+    process.stdout.on('error', ignore);
+    process.stderr.on('error', ignore);
+
+    return () => {
+        setHandlingInterrupts(false);
+        signals.forEach((name) => process.off(name, onInterrupt));
+        process.stdout.off('error', ignore);
+        process.stderr.off('error', ignore);
+    };
 }
 
 export function docker(args, options = {}) {
@@ -116,6 +151,18 @@ export function docker(args, options = {}) {
  */
 export function dockerSync(args, options = {}) {
     return execaSync('docker', args, options);
+}
+
+/**
+ * Pulls the images that aren't present yet. Throws on failure.
+ */
+export async function pullImages(images) {
+    for (const image of images) {
+        const { failed } = await docker(['image', 'inspect', image], {
+            reject: false,
+        });
+        if (failed) await docker(['pull', image]);
+    }
 }
 
 export function sleep(ms) {

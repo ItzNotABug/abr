@@ -7,19 +7,20 @@ import {
     appwriteDir,
     backupTypes,
     checkDocker,
+    composeSteps,
     docker,
     dockerSync,
     handleInterrupts,
     helperArgs,
     installFiles,
-    restartAppwriteStack,
-    resumeAppwriteStack,
+    runCompose,
     signalExitCode,
 } from '../utils/misc.js';
 import {
     movePath,
     newBackupFile,
     partialFile,
+    plainPartial,
     readPassphrase,
     removePath,
     removePathSync,
@@ -29,8 +30,6 @@ import { readBackupCompose } from '../utils/compose.js';
 import { acquireLock } from '../utils/lock.js';
 import {
     inspectDatabase,
-    isVolumeUsedByOthers,
-    listDatabaseFiles,
     removeSnapshot,
     removeSnapshotSync,
     snapshotDatabase,
@@ -47,8 +46,6 @@ import {
 const loader = loading('');
 
 export default class Backup {
-    static #backupType;
-
     /**
      * The backup command for `yargs` to manage.
      */
@@ -71,8 +68,6 @@ export default class Backup {
      * Starts task once yargs receives the command.
      */
     static async #performTask({ encrypt }) {
-        this.#backupType = '';
-
         if (
             !(await checkDocker(loader)) ||
             !this.#checkForAppwriteFolder() ||
@@ -94,18 +89,14 @@ export default class Backup {
 
         console.log('\n');
 
-        while (!this.#backupType || this.#backupType.length === 0) {
-            const response = await inquirer.prompt([
-                {
-                    type: 'checkbox',
-                    name: 'backupType',
-                    message: 'Select the type of backup',
-                    choices: backupTypes,
-                },
-            ]);
-
-            this.#backupType = response.backupType[0];
-        }
+        const { backupType } = await inquirer.prompt([
+            {
+                type: 'select',
+                name: 'backupType',
+                message: 'Select the type of backup',
+                choices: backupTypes,
+            },
+        ]);
 
         if (!encrypt && process.env.ABR_GPG_PASSPHRASE) {
             console.log(
@@ -157,8 +148,13 @@ export default class Backup {
 
         printVolumeSizes(measure, compose.volumes, compose.excluded);
 
-        await this.#performBackup(database, volumes, measure, passphrase);
-        this.#backupType = '';
+        await this.#performBackup(
+            backupType,
+            database,
+            volumes,
+            measure,
+            passphrase,
+        );
     }
 
     /**
@@ -186,54 +182,25 @@ export default class Backup {
     /**
      * Performs the backup of appwrite volumes.
      *
+     * @param type the type's value, from {@link backupTypes}.
      * @param database the database's `adapter`, `container` & `volume` names.
      * @param volumes the existing Appwrite volumes.
      * @param measure volume sizes & free disk space, from {@link measureVolumes}.
      * @param passphrase encrypts the archive, if any.
      */
-    static async #performBackup(database, volumes, measure, passphrase) {
+    static async #performBackup(type, database, volumes, measure, passphrase) {
         const { name } = database.adapter;
         // hot backups keep Appwrite running, a live copy of the database's files would be torn, so snapshot it first.
         // files are copied after it: new uploads become orphans, deleted ones may be missing.
-        let snapshotted = false;
+        const hot = type === 'hot-backup';
         let state = null;
-        let asIs = false;
-        if (this.#backupType === 'hot-backup') {
-            let usedByOthers;
-            try {
-                [state, usedByOthers] = await Promise.all([
-                    inspectDatabase(database.container),
-                    isVolumeUsedByOthers(database),
-                ]);
-            } catch (error) {
-                console.log(
-                    chalk.red(`❌ Could not inspect ${name}:`),
-                    error.message,
-                );
-                process.exitCode = 1;
-                return;
-            }
+        if (hot) {
+            state = await inspectDatabase(database.container);
 
-            // not writing, so its volume is consistent as is, checked after the copy.
-            // a missing container is e.g. after `compose down`.
-            const status = state?.status ?? 'missing';
-            const stopped = ['exited', 'created', 'dead', 'paused', 'missing'];
-            if (status === 'running') {
-                snapshotted = true;
-            } else if (stopped.includes(status) && !usedByOthers) {
-                console.log(
-                    chalk.yellow(
-                        `⚠️  ${name} is ${status}, copying its volume as is.`,
-                    ),
-                );
-                asIs = true;
-            } else {
-                const reason = usedByOthers
-                    ? `it is ${status} but its volume is used by another container`
-                    : `it is ${status}`;
+            if (state?.status !== 'running') {
                 console.log(
                     chalk.red(
-                        `❌ Cannot back up ${name}, ${reason}. Try a semi-hot or cold backup instead.`,
+                        `❌ Hot backups need a running ${name}, its container is ${state?.status ?? 'missing'}. Try a semi-hot or cold backup instead.`,
                     ),
                 );
                 process.exitCode = 1;
@@ -244,7 +211,7 @@ export default class Backup {
         const space = checkDiskSpace(
             measure,
             database.volume,
-            snapshotted,
+            hot,
             Boolean(passphrase),
             Boolean(database.adapter.dumpFile),
         );
@@ -263,7 +230,7 @@ export default class Backup {
         }
 
         const id = Date.now();
-        const snapshot = snapshotted ? snapshotName(id) : null;
+        const snapshot = snapshotName(id);
         const archive = `abr-archive-${id}`;
         const file = newBackupFile(Boolean(passphrase));
         // `command` is the running stop, pause or bring back, killed on a forced exit.
@@ -273,23 +240,21 @@ export default class Backup {
         let archived = false;
         let interrupted = 0;
 
-        // on interrupt, abort & let `finally` clean up & bring Appwrite back. a second one exits right away.
+        // on interrupt, abort & let `finally` clean up & bring Appwrite back. a second one exits within seconds:
+        // no backup keeps running & no plain archive stays.
         const release = handleInterrupts((received) => {
             loader.stop();
             if (interrupted) {
-                if (snapshot) removeSnapshotSync(snapshot, archive);
-                else dockerSync(['rm', '-f', archive], { reject: false });
-                removePathSync(partialFile(file));
+                // containers first, so they can't write again. `-v` also takes their anonymous volumes.
+                dockerSync(['rm', '-f', '-v', snapshot, archive]);
+                const partial = partialFile(file);
+                removePathSync(partial);
                 // offen's plain archive, if it got no passphrase.
-                if (passphrase) {
-                    removePathSync(partialFile(file).replace(/\.gpg$/, ''));
-                }
+                if (passphrase) removePathSync(plainPartial(partial));
+                if (hot) removeSnapshotSync(snapshot, archive);
                 stack.command?.kill();
                 this.#warnAppwriteDown(stack);
-                const down = stack.stopped || stack.paused;
-                process.exit(
-                    archived && !down ? (process.exitCode ?? 0) : interrupted,
-                );
+                process.exit(interrupted);
             }
             interrupted = signalExitCode(received);
             controller.abort();
@@ -297,7 +262,7 @@ export default class Backup {
 
         try {
             if (
-                snapshot &&
+                hot &&
                 !(await snapshotDatabase(
                     loader,
                     { ...database, ...state },
@@ -309,44 +274,34 @@ export default class Backup {
                 return;
             }
 
-            if (!(await this.#stopAppwrite(stack)) || signal.aborted) return;
-
-            // listed right before the copy, to compare with after it.
-            let files = null;
-            if (asIs) {
-                try {
-                    files = await listDatabaseFiles(database);
-                } catch (error) {
-                    console.log(
-                        chalk.red(`❌ Could not list ${name}’s files:`),
-                        error.stderr?.trim() || error.message,
-                    );
-                    process.exitCode = 1;
-                    return;
-                }
+            if (!(await this.#stopAppwrite(type, stack)) || signal.aborted) {
+                return;
             }
-            if (signal.aborted) return;
 
             archived = await this.#archiveVolumes({
                 volumes,
                 files: [...new Set([...installFiles, ...database.files])],
-                replace: snapshot && { [database.volume]: snapshot },
+                replace: hot && { [database.volume]: snapshot },
                 archive,
                 file,
                 passphrase,
                 signal,
-                verify:
-                    files !== null &&
-                    (async () => (await listDatabaseFiles(database)) === files),
             });
         } finally {
-            if (snapshot) await removeSnapshot(snapshot, archive);
-            const track = (command) => (stack.command = command);
+            if (hot) await removeSnapshot(snapshot, archive);
             if (stack.stopped) {
-                stack.stopped = !(await restartAppwriteStack(loader, track));
+                stack.stopped = !(await runCompose(
+                    loader,
+                    composeSteps.restart,
+                    stack,
+                ));
             }
             if (stack.paused) {
-                stack.paused = !(await resumeAppwriteStack(loader, track));
+                stack.paused = !(await runCompose(
+                    loader,
+                    composeSteps.resume,
+                    stack,
+                ));
             }
             this.#warnAppwriteDown(stack);
             // an interrupt during the final cleanup doesn't undo a finished backup.
@@ -386,51 +341,18 @@ export default class Backup {
      *
      * @returns {Promise<boolean>} `false` if that failed.
      */
-    static async #stopAppwrite(stack) {
-        const cold = this.#backupType === 'cold-backup';
-        if (!cold && this.#backupType !== 'semi-hot-backup') return true;
-
+    static async #stopAppwrite(type, stack) {
         // marked first, a failed stop may have stopped some services.
-        if (cold) stack.stopped = true;
-        else stack.paused = true;
-
-        loader.start(
-            chalk.blue(
-                cold
-                    ? 'Stopping Appwrite services...'
-                    : 'Pausing Appwrite services...',
-            ),
-        );
-        try {
-            // not cancelled on interrupt, a half stopped stack is harder to bring back.
-            stack.command = docker(['compose', cold ? 'down' : 'pause'], {
-                cwd: appwriteDir(),
-            });
-            await stack.command;
-            loader.stop();
-            console.log(
-                chalk.green(
-                    cold
-                        ? '✅ Appwrite services stopped.'
-                        : '✅ Appwrite services paused.',
-                ),
-            );
-            return true;
-        } catch (error) {
-            loader.stop();
-            if (!cold && error.message.includes('already paused')) return true;
-
-            console.log(
-                chalk.red(
-                    cold
-                        ? '❌ Error stopping Appwrite services:'
-                        : '❌ Error pausing Appwrite services:',
-                ),
-                error.message,
-            );
-            process.exitCode = 1;
-            return false;
+        // not cancelled on interrupt, a half stopped stack is harder to bring back.
+        if (type === 'cold-backup') {
+            stack.stopped = true;
+            return runCompose(loader, composeSteps.stop, stack);
         }
+        if (type === 'semi-hot-backup') {
+            stack.paused = true;
+            return runCompose(loader, composeSteps.pause, stack);
+        }
+        return true;
     }
 
     /**
@@ -459,7 +381,6 @@ export default class Backup {
      * @param options.file path of the archive to create.
      * @param options.passphrase encrypts the archive via GPG, if any.
      * @param options.signal aborts the archiving.
-     * @param options.verify checks the archive before it's kept, removed if it returns `false`.
      * @returns {Promise<boolean>} `true` if the archive was created.
      */
     static async #archiveVolumes({
@@ -470,12 +391,10 @@ export default class Backup {
         file,
         passphrase,
         signal,
-        verify,
     }) {
         // a truncated archive would be listed by restore, so it's only moved to its final name once complete.
         const partial = partialFile(file);
-        // offen's name for the archive, before it appends `.gpg`. a plain one, if it got no passphrase.
-        const plain = partial.replace(/\.gpg$/, '');
+        const plain = plainPartial(partial);
 
         try {
             loader.start('Starting backup process...');
@@ -483,7 +402,6 @@ export default class Backup {
                 helperArgs({
                     entrypoint: 'backup',
                     name: archive,
-                    role: 'backup',
                     mounts: [
                         ...volumes.map(
                             (volume) =>
@@ -541,11 +459,8 @@ export default class Backup {
         }
 
         // a complete archive is still removed if the interrupt came first.
-        const failed =
-            !signal.aborted && verify && !(await this.#verifyArchive(verify));
-        if (failed || signal.aborted) {
+        if (signal.aborted) {
             await removePath(partial);
-            if (failed) process.exitCode = 1;
             return false;
         }
 
@@ -569,27 +484,5 @@ export default class Backup {
 
         console.log(chalk.green('✅ Backup completed successfully.'));
         return true;
-    }
-
-    /**
-     * Runs the archive's `verify` check, prints why it failed.
-     */
-    static async #verifyArchive(verify) {
-        try {
-            if (await verify()) return true;
-        } catch (error) {
-            console.log(
-                chalk.red('❌ Could not check the database’s files:'),
-                error.stderr?.trim() || error.message,
-            );
-            return false;
-        }
-
-        console.log(
-            chalk.red(
-                '❌ The database wrote to its volume during the backup, the copy may be torn and was removed. Try again or use a cold backup.',
-            ),
-        );
-        return false;
     }
 }

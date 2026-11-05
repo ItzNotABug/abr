@@ -1,4 +1,4 @@
-import { docker, helperArgs } from '../misc.js';
+import { docker, envValue, helperArgs } from '../misc.js';
 
 export const name = 'MariaDB';
 
@@ -31,8 +31,8 @@ export const skipped = ['ibtmp1', 'ib_logfile*'];
  * @throws when the snapshot fails or `signal` aborted.
  */
 export async function snapshot(database, snapshot, signal) {
-    const credentials = rootCredentials(database.env);
-    if (!credentials) {
+    const password = rootPassword(database.env);
+    if (!password) {
         throw new Error(
             `MariaDB root password not found in ${database.container} environment.`,
         );
@@ -45,7 +45,6 @@ export async function snapshot(database, snapshot, signal) {
                 entrypoint: 'sh',
                 image: database.image,
                 name: snapshot,
-                role: 'backup',
                 extra: [
                     '--volumes-from',
                     `${database.container}:ro`,
@@ -53,12 +52,11 @@ export async function snapshot(database, snapshot, signal) {
                     `container:${database.container}`,
                 ],
                 mounts: [`${snapshot}:/snapshot`],
-                env: ['MYSQL_PWD', 'ABR_PASSWORD_FILE'],
+                env: ['MYSQL_PWD'],
             },
             '-c',
             [
                 'set -e',
-                'if [ -n "$ABR_PASSWORD_FILE" ]; then MYSQL_PWD="$(cat "$ABR_PASSWORD_FILE")"; export MYSQL_PWD; fi',
                 // per-table logs get huge, keep only the tail for errors.
                 'run() { "$@" > /tmp/abr.log 2>&1 || { tail -n 20 /tmp/abr.log >&2; exit 1; }; }',
                 // backup locks only wait on explicit `LOCK TABLES`, fail instead of hanging on them.
@@ -70,29 +68,16 @@ export async function snapshot(database, snapshot, signal) {
                 'chown -R mysql:mysql /snapshot',
             ].join('\n'),
         ),
-        {
-            cancelSignal: signal,
-            env: {
-                MYSQL_PWD: credentials.password,
-                ABR_PASSWORD_FILE: credentials.passwordFile,
-            },
-        },
+        { cancelSignal: signal, env: { MYSQL_PWD: password } },
     );
 }
 
 /**
- * Root credentials like the image's entrypoint: `MARIADB_*` over `MYSQL_*`, each a value or a `*_FILE`.
+ * Root password like the image's entrypoint: `MARIADB_*` over `MYSQL_*`.
  */
-function rootCredentials(env) {
-    const value = (key) =>
-        env.find((line) => line.startsWith(`${key}=`))?.slice(key.length + 1) ||
-        undefined;
-
-    for (const prefix of ['MARIADB', 'MYSQL']) {
-        const password = value(`${prefix}_ROOT_PASSWORD`);
-        const passwordFile = value(`${prefix}_ROOT_PASSWORD_FILE`);
-        if (password) return { password, passwordFile: '' };
-        if (passwordFile) return { password: '', passwordFile };
-    }
-    return null;
+function rootPassword(env) {
+    return (
+        envValue(env, 'MARIADB_ROOT_PASSWORD') ||
+        envValue(env, 'MYSQL_ROOT_PASSWORD')
+    );
 }

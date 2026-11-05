@@ -31,7 +31,7 @@ import { acquireLock } from '../utils/lock.js';
 import {
     inspectDatabase,
     removeSnapshot,
-    warnSnapshotLeft,
+    removeSnapshotVolumeSync,
     snapshotDatabase,
     snapshotName,
     warnLeftoverSnapshots,
@@ -247,12 +247,7 @@ export default class Backup {
             if (interrupted) {
                 // containers first, so they can't write again. `-v` also takes their anonymous volumes.
                 dockerSync(['rm', '-f', '-v', snapshot, archive]);
-                if (
-                    hot &&
-                    dockerSync(['volume', 'rm', '-f', snapshot]).failed
-                ) {
-                    warnSnapshotLeft(snapshot);
-                }
+                if (hot) removeSnapshotVolumeSync(snapshot);
                 const partial = partialFile(file);
                 removePathSync(partial);
                 if (passphrase) removePathSync(plainPartial(partial));

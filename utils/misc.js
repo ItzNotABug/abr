@@ -146,6 +146,13 @@ export function docker(args, options = {}) {
 }
 
 /**
+ * Blocks for `ms`, in a forced exit nothing async runs anymore.
+ */
+export function sleepSync(ms) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
  * {@link docker} for a forced exit, best effort, in ABR's process group as `execaSync` can't detach.
  */
 export function dockerSync(args) {

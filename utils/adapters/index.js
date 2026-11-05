@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { abrLabel, docker, sleep } from '../misc.js';
+import { abrLabel, docker, dockerSync, sleep, sleepSync } from '../misc.js';
 import * as mariadb from './mariadb.js';
 import * as mongodb from './mongodb.js';
 
@@ -93,9 +93,21 @@ export async function removeSnapshot(snapshot, ...containers) {
 }
 
 /**
+ * Removes the snapshot's volume in a forced exit, after its containers.
+ */
+export function removeSnapshotVolumeSync(snapshot) {
+    // stays in use briefly while an interrupted sidecar is torn down.
+    for (let attempt = 0; attempt < 10; attempt++) {
+        if (!dockerSync(['volume', 'rm', '-f', snapshot]).failed) return;
+        sleepSync(500);
+    }
+    warnSnapshotLeft(snapshot);
+}
+
+/**
  * Warns that the snapshot's volume stayed behind.
  */
-export function warnSnapshotLeft(snapshot) {
+function warnSnapshotLeft(snapshot) {
     process.exitCode ||= 1;
     console.log(
         chalk.yellow(

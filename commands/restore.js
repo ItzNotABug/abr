@@ -437,8 +437,14 @@ export default class Restore {
             ]),
         ]);
 
+        // only Appwrite's own: other volumes of the project aren't backed up, removing them would lose them.
         const volumeNames = [
-            ...new Set([...projectVolumes, ...namedVolumes]),
+            ...new Set([
+                ...projectVolumes.filter((volume) =>
+                    appwriteVolumeName.test(volume),
+                ),
+                ...namedVolumes,
+            ]),
         ].filter((volume) => !kept.includes(volume));
         const users = await Promise.all(
             volumeNames.map(async (volume) =>

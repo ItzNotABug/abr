@@ -181,11 +181,10 @@ export default class Share {
                 stopOnFailure(
                     Promise.all([
                         removeLeftoverTunnels(),
-                        pullImages([helperImage], controller.signal),
-                        // Cloudflare drops support for old cloudflared releases.
-                        pullImages([tunnelImage], controller.signal, {
-                            refresh: true,
-                        }),
+                        pullImages(
+                            [helperImage, tunnelImage],
+                            controller.signal,
+                        ),
                     ]),
                 ),
             ]);
@@ -241,46 +240,46 @@ export default class Share {
                 );
             }
 
-            // trycloudflare's API times out at times, a new tunnel usually gets through.
+            // trycloudflare's API times out at times & tunnels may drop right after connecting, a new one usually works.
+            // the link is printed once it opens, or after a minute: this machine's DNS may cache the new name's absence.
             const attempts = 5;
             let url = null;
-            for (
-                let attempt = 1;
-                attempt <= attempts && !interrupted;
-                attempt++
-            ) {
+            let reachable = false;
+            for (let attempt = 1; attempt <= attempts; attempt++) {
                 if (tunnel) await stopTunnel(tunnel);
                 if (attempt > 1) {
                     loader.text = chalk.blue(
                         `Starting the tunnel, attempt ${attempt} of ${attempts}...`,
                     );
-                    await sleep(2000 * attempt);
-                    if (interrupted) break;
+                    await Promise.race([sleep(2000 * attempt), stopped]);
                 }
+                if (interrupted) break;
+
                 tunnel = await startTunnel(port);
-                tunnel.exited.then(() => (tunnel.done = true));
+                // the share stopping or the tunnel exiting ends the waits below.
+                const ended = Promise.race([stopped, tunnel.exited]);
                 try {
                     url = await Promise.race([
                         tunnel.url,
-                        stopped.then(() => null),
+                        ended.then(() => null),
                     ]);
-                    break;
+                    reachable =
+                        url !== null &&
+                        (await reachesPublicly(`${url}/${share.probe}`, ended));
                 } catch (error) {
+                    url = null;
                     if (attempt === attempts) throw error;
+                    continue;
+                }
+                if (interrupted) break;
+                // a running tunnel is kept, its link confirmed or not.
+                if (url !== null && !(await isDone(tunnel))) break;
+                url = null;
+                if (attempt === attempts) {
+                    throw new Error('the tunnel stopped.');
                 }
             }
-
-            // a new hostname takes a moment to resolve, so the link is printed once it works, or after a minute:
-            // this machine's DNS may cache the name's absence while recipients reach it fine.
-            const reachable =
-                url &&
-                (await reachesPublicly(`${url}/${share.probe}`, stopped));
-            // stopped meanwhile, no link to print.
             if (interrupted) url = null;
-            // the tunnel died while checking, its link would be dead.
-            if (url && tunnel.done) {
-                throw new Error('the tunnel stopped.');
-            }
             loader.stop();
 
             if (url) {
@@ -451,11 +450,11 @@ function formatRemaining(ms) {
 }
 
 /**
- * Whether the URL answers through the tunnel within a minute, `false` if the share stopped meanwhile.
+ * Whether the URL answers through the tunnel within a minute, `false` once `ended`.
  */
-async function reachesPublicly(url, stopped) {
+async function reachesPublicly(url, ended) {
     let done = false;
-    stopped.then(() => (done = true));
+    ended.then(() => (done = true));
     for (const deadline = Date.now() + 60_000; Date.now() < deadline; ) {
         if (done) return false;
         try {
@@ -468,7 +467,17 @@ async function reachesPublicly(url, stopped) {
         } catch {
             // not resolvable or reachable yet.
         }
-        await sleep(2000);
+        await Promise.race([sleep(2000), ended]);
     }
     return false;
+}
+
+/**
+ * Whether the tunnel's process has exited.
+ */
+async function isDone(tunnel) {
+    return Promise.race([
+        tunnel.exited.then(() => true),
+        sleep(0).then(() => false),
+    ]);
 }

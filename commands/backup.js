@@ -464,6 +464,8 @@ export default class Backup {
     }) {
         // a truncated archive would be listed by restore, so it's only moved to its final name once complete.
         const partial = partialFile(file);
+        // offen's name for the archive, before it appends `.gpg`. a plain one, if it got no passphrase.
+        const plain = partial.replace(/\.gpg$/, '');
 
         try {
             loader.start('Starting backup process...');
@@ -486,7 +488,7 @@ export default class Backup {
                     // offen appends `.gpg` to encrypted archives.
                     // the passphrase via stdin, as env `docker inspect` would show it.
                     env: [
-                        `BACKUP_FILENAME=${path.basename(partial).replace(/\.gpg$/, '')}`,
+                        `BACKUP_FILENAME=${path.basename(plain)}`,
                         ...(passphrase
                             ? ['GPG_PASSPHRASE_FILE=/dev/stdin']
                             : []),
@@ -503,7 +505,7 @@ export default class Backup {
             await docker(['rm', '-f', archive], { reject: false });
             await removePath(partial);
             // offen's plain archive, if it got no passphrase.
-            if (passphrase) await removePath(partial.replace(/\.gpg$/, ''));
+            if (passphrase) await removePath(plain);
             if (signal.aborted) return false;
 
             console.log(
@@ -516,7 +518,6 @@ export default class Backup {
 
         // offen writes a plain archive without a passphrase, never keep that as encrypted.
         if (passphrase && !fs.existsSync(partial)) {
-            const plain = partial.replace(/\.gpg$/, '');
             const removed = await removePath(plain);
             console.log(
                 chalk.red(

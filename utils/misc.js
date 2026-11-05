@@ -138,24 +138,13 @@ export function dockerSync(args, options = {}) {
 
 /**
  * Pulls the images that aren't present yet. Throws on failure.
- *
- * @param options.refresh pull the latest even if present, falling back to the present one offline.
  */
-export async function pullImages(images, signal, { refresh = false } = {}) {
+export async function pullImages(images, signal) {
     for (const image of images) {
-        const present = async () =>
-            !(await docker(['image', 'inspect', image], { reject: false }))
-                .failed;
-        if (!refresh && (await present())) continue;
-
-        const { failed, stderr } = await docker(['pull', image], {
+        const { failed } = await docker(['image', 'inspect', image], {
             reject: false,
-            cancelSignal: signal,
         });
-        signal?.throwIfAborted();
-        if (failed && !(refresh && (await present()))) {
-            throw new Error(stderr?.trim() || `could not pull ${image}.`);
-        }
+        if (failed) await docker(['pull', image], { cancelSignal: signal });
     }
 }
 

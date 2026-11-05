@@ -386,8 +386,8 @@ export default class Restore {
         const compose = fs.existsSync(appwriteDir())
             ? await readCompose().catch(() => null)
             : null;
-        // restores bring the install back as project `appwrite`.
-        const filter = 'label=com.docker.compose.project=appwrite';
+        // the install's own project, another stack named `appwrite` isn't part of it.
+        const filter = `label=com.docker.compose.project=${compose?.project ?? 'appwrite'}`;
         // the current compose may predate the caches.
         const kept = cacheVolumes
             .map((key) => `appwrite_${key}`)

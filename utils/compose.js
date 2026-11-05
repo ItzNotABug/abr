@@ -13,7 +13,7 @@ export const cacheVolumes = ['appwrite-models'];
 /**
  * Reads the Appwrite install's compose config, resolved by compose itself: `.env`, shell overrides, quoting & comments.
  *
- * @returns {Promise<{database: {adapter: object|null, service: string|undefined, container: string|undefined, volume: string|undefined, files: string[]}, volumes: string[], excluded: string[], others: string[]}>}
+ * @returns {Promise<{project: string, database: {adapter: object|null, service: string|undefined, container: string|undefined, volume: string|undefined, files: string[]}, volumes: string[], excluded: string[], others: string[]}>}
  * `database` is the service of the `_APP_DB_ADAPTER`, its `adapter` from {@link adapters} or `null` if unsupported.
  * Its `files` are the ones it mounts from the `appwrite` folder, archived with it.
  * `volumes` are Appwrite's volumes to back up, `excluded` its caches & `others` volumes added to the install, neither backed up.
@@ -53,6 +53,7 @@ export async function readCompose() {
     )?.source;
 
     return {
+        project: config.name,
         database: {
             adapter,
             service: key,

@@ -21,14 +21,21 @@ export async function prepareCloudflared() {
     const { failed } = await execa(cloudflared.bin, ['--version'], {
         reject: false,
     });
-    if (failed) await cloudflared.install(cloudflared.bin);
+    if (!failed) return;
+    await cloudflared.install(cloudflared.bin);
+    const installed = await execa(cloudflared.bin, ['--version'], {
+        reject: false,
+    });
+    if (installed.failed) {
+        throw new Error('the cloudflared install failed, try again.');
+    }
 }
 
 /**
  * Starts a Cloudflare Quick Tunnel to `http://127.0.0.1:<port>`, which needs no account or domain.
  * Only after {@link prepareCloudflared}.
  *
- * @returns {{url: Promise<string>, exited: Promise<void>, done: boolean, stop: () => void}}
+ * @returns {{url: Promise<string>, exited: Promise<void>, done: boolean, stop: () => void, kill: () => void}}
  * `url` resolves once Cloudflare is connected, rejects if the tunnel exits first or takes over a minute.
  */
 export function startTunnel(port) {
@@ -39,7 +46,11 @@ export function startTunnel(port) {
     });
 
     const output = [];
-    const tunnel = { done: false, stop: () => quick.stop() };
+    const tunnel = {
+        done: false,
+        stop: () => quick.stop(),
+        kill: () => quick.process.kill('SIGKILL'),
+    };
     // a child process outlives ABR otherwise, keeping the link up.
     process.once('exit', tunnel.stop);
     // a failed start, e.g. a broken binary, may emit `error` without `exit`.
@@ -100,5 +111,8 @@ export function startTunnel(port) {
  */
 export async function stopTunnel(tunnel) {
     tunnel.stop();
+    // killed if it doesn't finish on its own, e.g. stuck in its shutdown.
+    const timeout = setTimeout(() => tunnel.kill(), 5000);
     await tunnel.exited;
+    clearTimeout(timeout);
 }

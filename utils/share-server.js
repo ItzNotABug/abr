@@ -31,6 +31,9 @@ export async function startServer(share, log) {
     const server = http.createServer((request, response) =>
         handleRequest(request, response, share, log),
     );
+    // longer than cloudflared keeps idle connections, 90s, else it may reuse a closed one & fail with 502.
+    server.keepAliveTimeout = 120_000;
+    server.headersTimeout = 125_000;
     await new Promise((resolve, reject) => {
         server.once('error', reject);
         server.listen(0, '127.0.0.1', () => {

@@ -15,61 +15,43 @@ const owner = `${os.hostname()}:${process.pid}`;
 export const tunnelImage = 'cloudflare/cloudflared:latest';
 
 /**
- * Pulls the latest image, Cloudflare drops support for old cloudflared releases. Offline, a present one is used.
- */
-export async function refreshImage(image, signal) {
-    const { failed, stderr } = await docker(['pull', image], {
-        reject: false,
-        cancelSignal: signal,
-    });
-    signal?.throwIfAborted();
-    if (!failed) return;
-    const present = await docker(['image', 'inspect', image], {
-        reject: false,
-    });
-    if (present.failed) {
-        throw new Error(stderr?.trim() || `could not pull ${image}.`);
-    }
-}
-
-/**
  * Starts a quick tunnel to `http://127.0.0.1:<port>`, in the host's network.
+ * The container is created before it starts, so {@link stopTunnel} always finds it by name.
  *
- * @returns {{name: string, subprocess: object, url: Promise<string>, exited: Promise<void>}}
+ * @returns {Promise<{name: string, subprocess: object, url: Promise<string>, exited: Promise<void>}>}
  * `url` resolves once Cloudflare is connected, rejects if the tunnel exits first or takes over a minute.
  */
-export function startTunnel(port) {
+export async function startTunnel(port) {
     const name = `abr-share-${Date.now()}`;
-    const subprocess = docker(
-        helperArgs(
-            {
-                entrypoint: 'cloudflared',
-                image: tunnelImage,
-                name,
-                role: 'share',
-                extra: [
-                    '--network',
-                    'host',
-                    '--label',
-                    `${ownerLabel}=${owner}`,
-                ],
-            },
-            'tunnel',
-            '--no-autoupdate',
-            // TCP, QUIC's UDP is often blocked by firewalls & nested networks.
-            '--protocol',
-            'http2',
-            '--url',
-            `http://127.0.0.1:${port}`,
-        ),
-        { buffer: false, stdout: 'ignore', reject: false },
+    const [, ...args] = helperArgs(
+        {
+            entrypoint: 'cloudflared',
+            image: tunnelImage,
+            name,
+            role: 'share',
+            extra: ['--network', 'host', '--label', `${ownerLabel}=${owner}`],
+        },
+        'tunnel',
+        '--no-autoupdate',
+        // TCP, QUIC's UDP is often blocked by firewalls & nested networks.
+        '--protocol',
+        'http2',
+        '--url',
+        `http://127.0.0.1:${port}`,
     );
+    await docker(['create', ...args]);
 
-    const url = waitForUrl(subprocess);
     // detached, so not stopped by execa on exit. a crash would leave the URL pointing at a port another process may take.
     const onExit = () => stopTunnelSync({ name });
     process.once('exit', onExit);
+    const subprocess = docker(['start', '--attach', name], {
+        buffer: false,
+        stdout: 'ignore',
+        reject: false,
+    });
     subprocess.finally(() => process.off('exit', onExit));
+
+    const url = waitForUrl(subprocess);
     // may reject after the caller stopped waiting, e.g. on Ctrl+C.
     url.catch(() => {});
     return { name, subprocess, url, exited: subprocess.then(() => {}) };
@@ -80,10 +62,8 @@ export function startTunnel(port) {
  */
 export async function stopTunnel({ name, subprocess, exited }) {
     await docker(['rm', '-f', name], { reject: false });
-    // the run may not have created the container yet, it's removed once the run is gone.
     subprocess.kill();
     await exited;
-    await docker(['rm', '-f', name], { reject: false });
 }
 
 /**

@@ -57,15 +57,16 @@ const extractorImage = 'debian:stable-slim';
 const decryptorImage = 'buildpack-deps:stable-curl';
 
 /**
- * Shell function writing the archive `/archive/$1` to stdout, decrypted if encrypted, with the passphrase from stdin.
+ * Shell function running tar with the given arguments on the archive `/archive/$1`.
+ * Encrypted ones are decrypted on the way, with the passphrase from stdin.
  * A wrong passphrase or a tampered archive fails it, after the data was read: callers need `pipefail`.
  */
 const archiveReader = [
     'set -o pipefail',
-    'archive() {',
+    'archive_tar() {',
     '  case "$1" in',
-    '    *.gpg) gpg --batch --quiet --no-symkey-cache --pinentry-mode loopback --passphrase-fd 0 --decrypt "/archive/$1" ;;',
-    '    *) cat "/archive/$1" ;;',
+    '    *.gpg) gpg --batch --quiet --no-symkey-cache --pinentry-mode loopback --passphrase-fd 0 --decrypt "/archive/$1" | tar "${@:2}" -f - ;;',
+    '    *) tar "${@:2}" -f "/archive/$1" ;;',
     '  esac',
     '}',
 ].join('\n');
@@ -195,7 +196,7 @@ export default class Restore {
                 this.#archiveScriptArgs(
                     file,
                     [`${path.dirname(file)}:/archive:ro`],
-                    'archive "$1" | tar -tvzP --quoting-style=c --numeric-owner -f -',
+                    'archive_tar "$1" -tvzP --quoting-style=c --numeric-owner',
                 ),
                 { buffer: { stdout: false }, input: passphrase || undefined },
             );
@@ -497,7 +498,7 @@ export default class Restore {
                         `${appwriteDir()}:/restore/backup/appwrite`,
                         `${path.dirname(file)}:/archive:ro`,
                     ],
-                    'archive "$1" | tar -xz -f - -C /restore --numeric-owner && if [ -n "$2" ]; then chown -R "$2" /restore/backup/appwrite; fi',
+                    'archive_tar "$1" -xz -C /restore --numeric-owner && if [ -n "$2" ]; then chown -R "$2" /restore/backup/appwrite; fi',
                     owner,
                 ),
                 { input: passphrase || undefined },
@@ -524,7 +525,7 @@ export default class Restore {
     }
 
     /**
-     * `docker run` arguments for a `script` reading the archive via `archive "$1"`, other `args` follow as `$2`...
+     * `docker run` arguments for a `script` reading the archive via `archive_tar "$1" <tar args>`, other `args` follow as `$2`...
      * Encrypted archives read the passphrase from stdin, as env `docker inspect` would show it.
      */
     static #archiveScriptArgs(file, mounts, script, ...args) {

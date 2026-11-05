@@ -25,7 +25,6 @@ import {
 } from '../utils/share-server.js';
 import {
     reachesLocalhost,
-    refreshImage,
     removeLeftoverTunnels,
     startTunnel,
     stopTunnel,
@@ -170,7 +169,6 @@ export default class Share {
     static async #prepare(file) {
         loader.start(chalk.blue('Preparing the share...'));
         try {
-            await removeLeftoverTunnels();
             // either failing stops the other, the process couldn't exit before.
             const controller = new AbortController();
             const stopOnFailure = (promise) =>
@@ -182,8 +180,12 @@ export default class Share {
                 stopOnFailure(hashFile(file, controller.signal)),
                 stopOnFailure(
                     Promise.all([
+                        removeLeftoverTunnels(),
                         pullImages([helperImage], controller.signal),
-                        refreshImage(tunnelImage, controller.signal),
+                        // Cloudflare drops support for old cloudflared releases.
+                        pullImages([tunnelImage], controller.signal, {
+                            refresh: true,
+                        }),
                     ]),
                 ),
             ]);
@@ -255,7 +257,7 @@ export default class Share {
                     await sleep(2000 * attempt);
                     if (interrupted) break;
                 }
-                tunnel = startTunnel(port);
+                tunnel = await startTunnel(port);
                 tunnel.exited.then(() => (tunnel.done = true));
                 try {
                     url = await Promise.race([

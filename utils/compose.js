@@ -89,16 +89,6 @@ export async function readBackupCompose() {
         return null;
     }
 
-    // restores bring the install back under the default project, its volumes would be others.
-    if (compose.project !== 'appwrite') {
-        console.error(
-            chalk.red(
-                `❌ Unsupported compose project name: ${compose.project}. Only the default "appwrite" is supported.`,
-            ),
-        );
-        return null;
-    }
-
     // e.g. a bind mount or a renamed volume, which restores wouldn't bring back.
     if (compose.mariadb?.volume !== mariadbVolume) {
         console.error(

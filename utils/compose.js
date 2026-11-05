@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import * as fs from 'fs';
 import * as path from 'path';
 import { adapters } from './adapters/index.js';
 import { appwriteDir, appwriteVolumeName, docker } from './misc.js';
@@ -64,7 +65,9 @@ export async function readCompose() {
                 .filter(
                     (mount) =>
                         mount.type === 'bind' &&
-                        path.dirname(mount.source) === appwriteDir(),
+                        // real paths, compose may resolve a symlinked folder.
+                        realPath(path.dirname(mount.source)) ===
+                            realPath(appwriteDir()),
                 )
                 .map((mount) => path.basename(mount.source)),
         },
@@ -124,4 +127,15 @@ export async function readBackupCompose() {
     }
 
     return compose;
+}
+
+/**
+ * The path with symlinks resolved, as is if it doesn't exist.
+ */
+function realPath(target) {
+    try {
+        return fs.realpathSync(target);
+    } catch {
+        return target;
+    }
 }

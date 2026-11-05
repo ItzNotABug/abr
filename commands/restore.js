@@ -177,8 +177,11 @@ export default class Restore {
 
         const volumes = new Set();
         const files = new Set();
-        // a volume's top-level files, e.g. a dump in place of the database's files.
-        const volumeFiles = new Set();
+        // database dumps in place of a volume's files, as `<volume>/<dumpFile>`.
+        const dumpPaths = Object.values(adapters)
+            .filter(({ dumpFile }) => dumpFile)
+            .map(({ volume, dumpFile }) => `${volume}/${dumpFile}`);
+        const dumps = new Set();
         const unexpected = new Set();
         // the archived `.env`'s name, as stored.
         let env;
@@ -229,8 +232,8 @@ export default class Restore {
                     }
                 } else if (appwriteVolumeName.test(dir)) {
                     volumes.add(dir);
-                    if (parts.length === 3)
-                        volumeFiles.add(`${dir}/${parts[2]}`);
+                    const top = parts.slice(1).join('/');
+                    if (type === '-' && dumpPaths.includes(top)) dumps.add(top);
                 } else {
                     unexpected.add(`backup/${dir}`);
                 }
@@ -309,7 +312,7 @@ export default class Restore {
         return {
             volumes: [...volumes],
             adapter,
-            dumped: volumeFiles.has(`${adapter.volume}/${adapter.dumpFile}`),
+            dumped: dumps.has(`${adapter.volume}/${adapter.dumpFile}`),
         };
     }
 

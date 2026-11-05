@@ -299,7 +299,7 @@ export async function runCompose(
         loader.stop();
         if (harmless && error.message.includes(harmless)) return true;
 
-        printError(failed, error);
+        console.error(chalk.red(`❌ ${failed}`), error.message);
         process.exitCode = 1;
         return false;
     }

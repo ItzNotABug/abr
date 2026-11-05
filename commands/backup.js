@@ -421,7 +421,10 @@ export default class Backup {
             if (passphrase) await removePath(plain);
             if (signal.aborted) return false;
 
-            printError('Error during backup process:', error);
+            console.log(
+                chalk.red('❌ Error during backup process:'),
+                error.message,
+            );
             process.exitCode = 1;
             return false;
         }

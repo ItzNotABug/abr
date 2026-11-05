@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import * as fs from 'fs';
 import * as path from 'path';
 import { adapters } from './adapters/index.js';
-import { appwriteDir, appwriteVolumeName, docker } from './misc.js';
+import { appwriteDir, appwriteVolumeName, docker, printError } from './misc.js';
 
 /**
  * Compose keys of volumes that aren't backed up, as they hold re-downloadable caches.
@@ -13,7 +13,7 @@ export const cacheVolumes = ['appwrite-models'];
 /**
  * Reads the Appwrite install's compose config, resolved by compose itself: `.env`, shell overrides, quoting & comments.
  *
- * @returns {Promise<{project: string, database: {adapter: object|null, container: string|undefined, volume: string|undefined, files: string[]}, volumes: string[], excluded: string[], others: string[]}>}
+ * @returns {Promise<{database: {adapter: object|null, service: string|undefined, container: string|undefined, volume: string|undefined, files: string[]}, volumes: string[], excluded: string[], others: string[]}>}
  * `database` is the service of the `_APP_DB_ADAPTER`, its `adapter` from {@link adapters} or `null` if unsupported.
  * Its `files` are the ones it mounts from the `appwrite` folder, archived with it.
  * `volumes` are Appwrite's volumes to back up, `excluded` its caches & `others` volumes added to the install, neither backed up.
@@ -53,7 +53,6 @@ export async function readCompose() {
     )?.source;
 
     return {
-        project: config.name,
         database: {
             adapter,
             service: key,
@@ -67,10 +66,12 @@ export async function readCompose() {
                     (mount) =>
                         mount.type === 'bind' &&
                         // files only, a folder or a missing file can't be archived as one.
-                        isFile(mount.source) &&
+                        fs
+                            .statSync(mount.source, { throwIfNoEntry: false })
+                            ?.isFile() &&
                         // real paths, compose may resolve a symlinked folder.
-                        realPath(path.dirname(mount.source)) ===
-                            realPath(appwriteDir()),
+                        fs.realpathSync(path.dirname(mount.source)) ===
+                            fs.realpathSync(appwriteDir()),
                 )
                 .map((mount) => path.basename(mount.source)),
         },
@@ -90,10 +91,7 @@ export async function readBackupCompose() {
     try {
         compose = await readCompose();
     } catch (error) {
-        console.error(
-            chalk.red('❌ Could not read the Appwrite compose config:'),
-            error.stderr?.trim() || error.message,
-        );
+        printError('Could not read the Appwrite compose config:', error);
         return null;
     }
 
@@ -130,26 +128,4 @@ export async function readBackupCompose() {
     }
 
     return compose;
-}
-
-/**
- * The path with symlinks resolved, as is if it doesn't exist.
- */
-function realPath(target) {
-    try {
-        return fs.realpathSync(target);
-    } catch {
-        return target;
-    }
-}
-
-/**
- * Whether `target` is a regular file, `false` if it can't be read.
- */
-function isFile(target) {
-    try {
-        return fs.statSync(target).isFile();
-    } catch {
-        return false;
-    }
 }

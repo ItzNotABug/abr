@@ -31,7 +31,10 @@ export const skipped = ['ibtmp1', 'ib_logfile*'];
  * @throws when the snapshot fails or `signal` aborted.
  */
 export async function snapshot(database, snapshot, signal) {
-    const password = rootPassword(database.env);
+    // like the image's entrypoint: `MARIADB_*` over `MYSQL_*`.
+    const password =
+        envValue(database.env, 'MARIADB_ROOT_PASSWORD') ||
+        envValue(database.env, 'MYSQL_ROOT_PASSWORD');
     if (!password) {
         throw new Error(
             `MariaDB root password not found in ${database.container} environment.`,
@@ -69,15 +72,5 @@ export async function snapshot(database, snapshot, signal) {
             ].join('\n'),
         ),
         { cancelSignal: signal, env: { MYSQL_PWD: password } },
-    );
-}
-
-/**
- * Root password like the image's entrypoint: `MARIADB_*` over `MYSQL_*`.
- */
-function rootPassword(env) {
-    return (
-        envValue(env, 'MARIADB_ROOT_PASSWORD') ||
-        envValue(env, 'MYSQL_ROOT_PASSWORD')
     );
 }

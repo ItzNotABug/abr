@@ -66,9 +66,9 @@ export function envValue(env, key) {
 export const abrLabel = 'com.itznotabug.abr';
 
 /**
- * Image of ABR's helper containers, always pulled for backups as it creates the archives.
+ * Image of ABR's helper containers, it creates the archives. `docker run` pulls it if missing.
  */
-export const helperImage = 'offen/docker-volume-backup:latest';
+const helperImage = 'offen/docker-volume-backup:latest';
 
 /**
  * `docker run` arguments for an ABR helper container, removed on exit. `--init` makes signals stop it.
@@ -113,6 +113,11 @@ export function appwriteDir() {
 }
 
 /**
+ * Signals ABR handles, to clean up or release its lock.
+ */
+export const exitSignals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
+
+/**
  * While ABR handles interrupts itself, docker commands run in their own process group,
  * so a Ctrl+C reaches only ABR, which then stops or finishes them. Otherwise it stops them too.
  */
@@ -123,9 +128,8 @@ let detached = false;
  * Meanwhile docker commands run detached & write errors of a hung up terminal are ignored.
  */
 export function handleInterrupts(onInterrupt) {
-    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
     // `on`, not `once`: execa's exit hook re-raises the signal if no other listener is left.
-    signals.forEach((name) => process.on(name, onInterrupt));
+    exitSignals.forEach((name) => process.on(name, onInterrupt));
     detached = true;
 
     // a hung up terminal (SIGHUP) fails writes with EIO, don't crash before the cleanup.
@@ -135,7 +139,7 @@ export function handleInterrupts(onInterrupt) {
 
     return () => {
         detached = false;
-        signals.forEach((name) => process.off(name, onInterrupt));
+        exitSignals.forEach((name) => process.off(name, onInterrupt));
         process.stdout.off('error', ignore);
         process.stderr.off('error', ignore);
     };
@@ -160,17 +164,13 @@ export function dockerSync(args) {
 }
 
 /**
- * Pulls the image if it isn't present yet. Throws on failure.
+ * Prints an error under `title`, with docker's own words if it came from a command.
  */
-export async function pullImage(image) {
-    const { failed } = await docker(['image', 'inspect', image], {
-        reject: false,
-    });
-    if (failed) await docker(['pull', image]);
-}
-
-export function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+export function printError(title, error) {
+    console.error(
+        chalk.red(`❌ ${title}`),
+        error.stderr?.trim() || error.message,
+    );
 }
 
 /**
@@ -230,7 +230,7 @@ export async function checkDocker(loader) {
 
 /**
  * `docker compose` steps on the Appwrite stack, for {@link runCompose}.
- * `restart` takes a while, it also fetches all the pruned images from docker hub.
+ * `restart` takes a while, it may also fetch missing images from docker hub.
  * `harmless` is an error that counts as done.
  */
 export const composeSteps = {

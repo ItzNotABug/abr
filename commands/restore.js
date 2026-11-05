@@ -11,9 +11,10 @@ import {
     composeSteps,
     defaultVolumes,
     docker,
+    exitSignals,
     helperArgs,
     installFiles,
-    pullImage,
+    printError,
     runCompose,
     signalExitCode,
 } from '../utils/misc.js';
@@ -32,14 +33,9 @@ import { acquireLock } from '../utils/lock.js';
 const loader = loading('');
 
 /**
- * Extracts archives. GNU tar, busybox's ignores the PAX headers of files over 8 GB.
+ * Reads & extracts archives. GNU tar, busybox's ignores the PAX headers of files over 8 GB, plus GPG.
  */
-const extractorImage = 'debian:stable-slim';
-
-/**
- * Extracts encrypted archives, the extractor's GNU tar plus GPG.
- */
-const decryptorImage = 'buildpack-deps:stable-curl';
+const archiveImage = 'buildpack-deps:stable-curl';
 
 /**
  * Shell function running tar with the given arguments on the archive `/archive/$1`.
@@ -83,7 +79,7 @@ export default class Restore {
         }
 
         // exits via `process.exit` to release the lock, attached docker commands get the same Ctrl+C.
-        for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']) {
+        for (const name of exitSignals) {
             process.on(name, () => {
                 loader.stop();
                 if (this.#phase === 'changing') {
@@ -129,29 +125,21 @@ export default class Restore {
 
         let restored = false;
         try {
-            const image = this.#extractor(file);
-            loader.start(chalk.blue('Preparing the restore...'));
-            await pullImage(image);
-            loader.stop();
-
             const backup = await this.#readArchive(file, passphrase);
             restored =
                 Boolean(backup) &&
-                (await this.#removeRemnants(backup.volumes, image)) &&
+                (await this.#removeRemnants(backup.volumes)) &&
                 (await this.#extractArchive(
                     file,
                     backup.volumes,
                     passphrase,
                 )) &&
-                (!backup.dumped || (await this.#restoreDump(backup.adapter)));
+                (!backup.dump || (await this.#restoreDump(backup.dump)));
         } catch (error) {
             loader.stop();
             // Ctrl+C at a prompt, handled in index.js.
             if (error.name === 'ExitPromptError') throw error;
-            console.log(
-                chalk.red('❌ Could not restore:'),
-                error.stderr?.trim() || error.message,
-            );
+            printError('Could not restore:', error);
         }
 
         if (!restored) {
@@ -174,8 +162,8 @@ export default class Restore {
      * Reads the whole archive, which also checks its compression & encryption.
      *
      * @param passphrase decrypts the archive, if encrypted.
-     * @returns {Promise<{volumes: string[], adapter: object, dumped: boolean}|null>} the volumes in it, its install's database
-     * & whether that's a dump, `null` with the reason printed if it's unusable.
+     * @returns {Promise<{volumes: string[], dump: object|null}|null>} the volumes in it & the adapter of the database dump it holds,
+     * if any. `null` with the reason printed if it's unusable.
      */
     static async #readArchive(file, passphrase) {
         loader.start(chalk.blue('Checking the backup...'));
@@ -191,7 +179,7 @@ export default class Restore {
         const filled = new Set();
         const unexpected = new Set();
         try {
-            // with the extractor's tar, which reads it the same way. streamed, archives can hold millions of files.
+            // with the tar that extracts it, which reads it the same way. streamed, archives can hold millions of files.
             // `-P`: offen's names start with `/`, tar would warn about it. its folders have no trailing `/`, so entries are checked by name only.
             const listing = docker(
                 this.#archiveScriptArgs(
@@ -232,6 +220,8 @@ export default class Restore {
             loader.stop();
         } catch (error) {
             loader.stop();
+            // docker's own failure, e.g. pulling the image, says nothing about the archive.
+            if (error.exitCode === 125) throw error;
             if (/bad session key/i.test(error.stderr ?? '')) {
                 console.log(
                     chalk.red(
@@ -240,10 +230,7 @@ export default class Restore {
                 );
                 return null;
             }
-            console.log(
-                chalk.red('❌ The backup is unreadable or incomplete:'),
-                error.stderr?.trim() || error.message,
-            );
+            printError('The backup is unreadable or incomplete:', error);
             return null;
         }
 
@@ -266,26 +253,20 @@ export default class Restore {
             return null;
         }
 
-        // the backed up install's database: the one with a dump, else with a volume. installs before 1.9 always run MariaDB.
         // a hot backup's database volume holds only its dump.
-        const dumped = (volume, dumpFile) =>
-            dumps.has(`${volume}/${dumpFile}`) && !filled.has(volume);
         const candidates = Object.values(adapters);
-        const adapter =
-            candidates.find(({ volume, dumpFile }) =>
-                dumped(volume, dumpFile),
-            ) ?? candidates.find(({ volume }) => volumes.has(volume));
-        if (!adapter) {
+        const dump =
+            candidates.find(
+                ({ volume, dumpFile }) =>
+                    dumps.has(`${volume}/${dumpFile}`) && !filled.has(volume),
+            ) ?? null;
+        if (!dump && !candidates.some(({ volume }) => volumes.has(volume))) {
             console.log(chalk.red('❌ The backup has no database volume.'));
             return null;
         }
 
         console.log(chalk.green('✅ Backup checked.'));
-        return {
-            volumes: [...volumes],
-            adapter,
-            dumped: dumped(adapter.volume, adapter.dumpFile),
-        };
+        return { volumes: [...volumes], dump };
     }
 
     /**
@@ -300,10 +281,7 @@ export default class Restore {
             loader.stop();
         } catch (error) {
             loader.stop();
-            console.error(
-                chalk.red(`❌ Error restoring the ${adapter.name} dump:`),
-                error.stderr?.trim() || error.message,
-            );
+            printError(`Error restoring the ${adapter.name} dump:`, error);
             return false;
         }
 
@@ -314,18 +292,14 @@ export default class Restore {
     /**
      * Removes the install's containers & volumes, the volumes the backup restores & the `appwrite` folder, once confirmed.
      *
-     * @param image already pulled, for root fallbacks.
      * @returns {Promise<boolean>} `false` if declined or failed.
      */
-    static async #removeRemnants(volumes, image) {
+    static async #removeRemnants(volumes) {
         let remnants;
         try {
             remnants = await this.#findRemnants(volumes);
         } catch (error) {
-            console.error(
-                chalk.red('❌ Error checking for Appwrite remnants:'),
-                error.stderr?.trim() || error.message,
-            );
+            printError('Error checking for Appwrite remnants:', error);
             return false;
         }
 
@@ -390,15 +364,12 @@ export default class Restore {
             if (volumeNames.length) {
                 await docker(['volume', 'rm', '-f', ...volumeNames]);
             }
-            // e.g. root-owned, as created by Appwrite's installer.
-            if (!(await removePath(appwriteDir(), image))) {
+            // e.g. root-owned, as created by Appwrite's installer. the image is here, it read the archive.
+            if (!(await removePath(appwriteDir(), archiveImage))) {
                 throw new Error(`could not remove ${appwriteDir()}.`);
             }
         } catch (error) {
-            console.error(
-                chalk.red('❌ Error removing Appwrite remnants:'),
-                error.stderr?.trim() || error.message,
-            );
+            printError('Error removing Appwrite remnants:', error);
             return false;
         }
 
@@ -415,20 +386,12 @@ export default class Restore {
         const compose = fs.existsSync(appwriteDir())
             ? await readCompose().catch(() => null)
             : null;
-        const project = compose?.project ?? 'appwrite';
-        const filter = `label=com.docker.compose.project=${project}`;
-        // reused only under the default project, restores bring the install back as `appwrite`.
-        // the default caches too, the current compose may predate them.
-        const kept = (
-            project !== 'appwrite'
-                ? []
-                : [
-                      ...new Set([
-                          ...(compose?.excluded ?? []),
-                          ...cacheVolumes.map((key) => `${project}_${key}`),
-                      ]),
-                  ]
-        ).filter((volume) => !volumes.includes(volume));
+        // restores bring the install back as project `appwrite`.
+        const filter = 'label=com.docker.compose.project=appwrite';
+        // the current compose may predate the caches.
+        const kept = cacheVolumes
+            .map((key) => `appwrite_${key}`)
+            .filter((volume) => !volumes.includes(volume));
 
         const list = async (args) =>
             (await docker(args)).stdout.split('\n').filter(Boolean);
@@ -449,10 +412,8 @@ export default class Restore {
         // only Appwrite's own: other volumes of the project aren't backed up, removing them would lose them.
         const volumeNames = [
             ...new Set([
-                ...projectVolumes.filter(
-                    (volume) =>
-                        appwriteVolumeName.test(volume) ||
-                        volume.startsWith(`${project}_appwrite-`),
+                ...projectVolumes.filter((volume) =>
+                    appwriteVolumeName.test(volume),
                 ),
                 ...namedVolumes,
             ]),
@@ -523,22 +484,12 @@ export default class Restore {
             loader.stop();
         } catch (error) {
             loader.stop();
-            console.error(
-                chalk.red('❌ Error during data restoration:'),
-                error.stderr?.trim() || error.message,
-            );
+            printError('Error during data restoration:', error);
             return false;
         }
 
         console.log(chalk.green('✅ Restoration completed successfully.'));
         return true;
-    }
-
-    /**
-     * The image to read the archive with.
-     */
-    static #extractor(file) {
-        return isEncrypted(file) ? decryptorImage : extractorImage;
     }
 
     /**
@@ -549,9 +500,10 @@ export default class Restore {
         return helperArgs(
             {
                 entrypoint: 'bash',
-                image: this.#extractor(file),
+                image: archiveImage,
                 mounts,
-                extra: isEncrypted(file) ? ['-i'] : [],
+                // quiet, a pull's progress would end up in the errors printed from stderr.
+                extra: ['--quiet', ...(isEncrypted(file) ? ['-i'] : [])],
             },
             '-c',
             `${archiveReader}\n${script}`,

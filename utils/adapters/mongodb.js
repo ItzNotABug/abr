@@ -37,7 +37,9 @@ export const dumpFile = 'mongodb.archive.gz';
  * @throws when the dump fails or `signal` aborted.
  */
 export async function snapshot(database, snapshot, signal) {
-    const { user, password } = rootCredentials(database.env);
+    // as the image's entrypoint creates them.
+    const user = envValue(database.env, 'MONGO_INITDB_ROOT_USERNAME');
+    const password = envValue(database.env, 'MONGO_INITDB_ROOT_PASSWORD');
     if (!user || !password) {
         throw new Error(
             `MongoDB root credentials not found in ${database.container} environment.`,
@@ -95,14 +97,4 @@ chown -R mongodb:mongodb ${dataDir}`,
         ],
         { cwd: appwriteDir() },
     );
-}
-
-/**
- * Root credentials as the image's entrypoint creates them.
- */
-function rootCredentials(env) {
-    return {
-        user: envValue(env, 'MONGO_INITDB_ROOT_USERNAME'),
-        password: envValue(env, 'MONGO_INITDB_ROOT_PASSWORD'),
-    };
 }

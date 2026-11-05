@@ -183,8 +183,6 @@ export default class Restore {
             .map(({ volume, dumpFile }) => `${volume}/${dumpFile}`);
         const dumps = new Set();
         const unexpected = new Set();
-        // the archived `.env`'s name, as stored.
-        let env;
         // names become `docker run -v` sources & are removed first, so only Appwrite's own volumes.
         // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
         // numeric owners, so a crafted user name can't look like the quoted name.
@@ -226,7 +224,6 @@ export default class Restore {
                     if (parts.length === 2) continue;
                     if (type === '-' && parts.length === 3) {
                         files.add(parts[2]);
-                        if (parts[2] === '.env') env = name;
                     } else {
                         unexpected.add(name);
                     }
@@ -277,34 +274,14 @@ export default class Restore {
             return null;
         }
 
-        // the backed up install's database, as its `.env` sets it. installs before 1.9 always run MariaDB.
-        let setting;
-        try {
-            setting =
-                (await this.#readEnvSetting(file, env, passphrase)) ??
-                'mariadb';
-        } catch (error) {
-            console.log(
-                chalk.red('❌ Could not read the backup’s .env:'),
-                error.stderr?.trim() || error.message,
-            );
-            return null;
-        }
-        const adapter = Object.hasOwn(adapters, setting)
-            ? adapters[setting]
-            : null;
+        // the backed up install's database: the one with a dump, else with a volume. installs before 1.9 always run MariaDB.
+        const candidates = Object.values(adapters);
+        const adapter =
+            candidates.find(({ volume, dumpFile }) =>
+                dumps.has(`${volume}/${dumpFile}`),
+            ) ?? candidates.find(({ volume }) => volumes.has(volume));
         if (!adapter) {
-            console.log(
-                chalk.red(
-                    `❌ The backup's database "${setting}" is unsupported.`,
-                ),
-            );
-            return null;
-        }
-        if (!volumes.has(adapter.volume)) {
-            console.log(
-                chalk.red(`❌ The backup is missing ${adapter.volume}.`),
-            );
+            console.log(chalk.red('❌ The backup has no database volume.'));
             return null;
         }
 
@@ -314,23 +291,6 @@ export default class Restore {
             adapter,
             dumped: dumps.has(`${adapter.volume}/${adapter.dumpFile}`),
         };
-    }
-
-    /**
-     * Reads `_APP_DB_ADAPTER` from the archived `.env`, stored as `env`. `undefined` if unset.
-     */
-    static async #readEnvSetting(file, env, passphrase) {
-        // stops at the `.env`, near the start. no pipefail, as decryption then fails on the closed pipe.
-        const { stdout } = await docker(
-            this.#archiveScriptArgs(
-                file,
-                [`${path.dirname(file)}:/archive:ro`],
-                'set +o pipefail\narchive_tar "$1" -xzOP --occurrence=1 "$2"',
-                env,
-            ),
-            { input: passphrase || undefined },
-        );
-        return stdout.match(/^_APP_DB_ADAPTER=(["']?)(\w+)\1\s*$/m)?.[2];
     }
 
     /**

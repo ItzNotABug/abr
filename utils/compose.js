@@ -65,6 +65,10 @@ export async function readCompose() {
                 .filter(
                     (mount) =>
                         mount.type === 'bind' &&
+                        // files only, a folder or a missing file can't be archived as one.
+                        fs
+                            .statSync(mount.source, { throwIfNoEntry: false })
+                            ?.isFile() &&
                         // real paths, compose may resolve a symlinked folder.
                         realPath(path.dirname(mount.source)) ===
                             realPath(appwriteDir()),

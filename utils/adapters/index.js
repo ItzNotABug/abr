@@ -1,12 +1,5 @@
 import chalk from 'chalk';
-import {
-    abrLabel,
-    docker,
-    dockerSync,
-    helperArgs,
-    sleep,
-    sleepSync,
-} from '../misc.js';
+import { abrLabel, docker, sleep } from '../misc.js';
 import * as mariadb from './mariadb.js';
 import * as mongodb from './mongodb.js';
 
@@ -17,69 +10,17 @@ import * as mongodb from './mongodb.js';
 export const adapters = { mariadb, mongodb };
 
 /**
- * Returns the database container's `status`, `image` id & `env`, or `null` if it doesn't exist.
- *
- * Throws on any other failure, callers must not mistake it for a stopped database.
+ * Returns the database container's `status`, `image` id & `env`, or `null` if it can't be inspected, e.g. after `compose down`.
  */
 export async function inspectDatabase(container) {
-    const { failed, stdout, stderr } = await docker(
+    const { failed, stdout } = await docker(
         ['container', 'inspect', container],
         { reject: false },
     );
-    if (failed) {
-        if (/no such (container|object)/i.test(stderr)) return null;
-        throw new Error(stderr?.trim() || 'docker container inspect failed.');
-    }
+    if (failed) return null;
 
-    try {
-        const [{ State, Image, Config }] = JSON.parse(stdout);
-        return {
-            status: State.Status,
-            image: Image,
-            env: Config.Env ?? [],
-        };
-    } catch {
-        throw new Error('unexpected docker container inspect output.');
-    }
-}
-
-/**
- * Whether a running or paused container other than the database uses its volume. Throws if unknown.
- */
-export async function isVolumeUsedByOthers({ container, volume }) {
-    const { failed, stdout, stderr } = await docker(
-        ['ps', '--format', '{{.Names}}', '--filter', `volume=${volume}`],
-        { reject: false },
-    );
-    if (failed) throw new Error(stderr?.trim() || 'docker ps failed.');
-
-    return stdout.split('\n').some((name) => name && name !== container);
-}
-
-/**
- * Lists the volume's files with sizes & change times, any write changes it. Throws on failure.
- *
- * Stopped databases are copied as is, this tells if one wrote during the copy, e.g. started or unpaused briefly.
- */
-export async function listDatabaseFiles({ volume }) {
-    const { stdout } = await docker(
-        helperArgs(
-            {
-                entrypoint: 'find',
-                mounts: [`${volume}:/data:ro`],
-                workdir: '/data',
-            },
-            '.',
-            '-exec',
-            'stat',
-            '-c',
-            '%n %s %y %z',
-            '{}',
-            '+',
-        ),
-    );
-    // sorted, directory order may differ between runs.
-    return stdout.split('\n').sort().join('\n');
+    const [{ State, Image, Config }] = JSON.parse(stdout);
+    return { status: State.Status, image: Image, env: Config.Env ?? [] };
 }
 
 /**
@@ -99,40 +40,7 @@ export async function snapshotDatabase(loader, database, snapshot, signal) {
     const { name } = database.adapter;
     loader.start(chalk.blue(`Creating ${name} snapshot...`));
 
-    const fail = (message, suggestOtherTypes = true) => {
-        loader.stop();
-        if (signal.aborted) return false;
-
-        console.log(chalk.red(`❌ Error creating ${name} snapshot:`), message);
-        if (suggestOtherTypes) {
-            console.log(
-                chalk.yellow('⚠️  Try a semi-hot or cold backup instead.'),
-            );
-        }
-        return false;
-    };
-
-    // e.g. a sidecar of a killed run, still holding backup locks & disk space.
-    const running = await docker(
-        [
-            'ps',
-            '--format',
-            '{{.Names}}',
-            '--filter',
-            `label=${abrLabel}=backup`,
-        ],
-        { reject: false },
-    );
-    if (running.stdout?.trim()) {
-        // pausing or stopping Appwrite would break the running backup, so no other types.
-        return fail(
-            `another backup is running (${running.stdout.trim().split('\n').join(', ')}). If not, remove it via "docker rm -f <name>".`,
-            false,
-        );
-    }
-
     try {
-        signal.throwIfAborted();
         await docker(
             ['volume', 'create', '--label', `${abrLabel}=snapshot`, snapshot],
             {
@@ -141,13 +49,19 @@ export async function snapshotDatabase(loader, database, snapshot, signal) {
         );
         await database.adapter.snapshot(database, snapshot, signal);
     } catch (error) {
-        // execa's messages include the whole command.
-        return fail(
+        loader.stop();
+        if (signal.aborted) return false;
+
+        console.log(
+            chalk.red(`❌ Error creating ${name} snapshot:`),
+            // execa's messages include the whole command.
             error.stderr?.trim() ||
                 (error.exitCode === undefined
                     ? error.message
                     : `exited with code ${error.exitCode}`),
         );
+        console.log(chalk.yellow('⚠️  Try a semi-hot or cold backup instead.'));
+        return false;
     }
 
     loader.stop();
@@ -179,28 +93,9 @@ export async function removeSnapshot(snapshot, ...containers) {
 }
 
 /**
- * {@link removeSnapshot} for a forced exit.
+ * Warns that the snapshot's volume stayed behind.
  */
-export function removeSnapshotSync(snapshot, ...containers) {
-    dockerSync(['rm', '-f', '-v', snapshot, ...containers], {
-        reject: false,
-    });
-
-    for (let attempt = 0; attempt < 10; attempt++) {
-        const { exitCode } = dockerSync(['volume', 'rm', '-f', snapshot], {
-            reject: false,
-        });
-        if (exitCode === 0) return;
-        sleepSync(500);
-    }
-
-    warnSnapshotLeft(snapshot);
-}
-
-/**
- * Warns that a snapshot volume, a full copy of the database, could not be removed.
- */
-function warnSnapshotLeft(snapshot) {
+export function warnSnapshotLeft(snapshot) {
     process.exitCode ||= 1;
     console.log(
         chalk.yellow(

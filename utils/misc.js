@@ -52,8 +52,16 @@ export const defaultVolumes = [
 export const installFiles = ['.env', 'docker-compose.yml'];
 
 /**
+ * A variable's value from the `KEY=value` list of `docker inspect`.
+ */
+export function envValue(env, key) {
+    return env
+        .find((line) => line.startsWith(`${key}=`))
+        ?.slice(key.length + 1);
+}
+
+/**
  * Marks containers & volumes created by ABR, to find leftovers of killed runs.
- * Valued `backup` on the snapshot & archive containers, which hold locks & write.
  */
 export const abrLabel = 'com.itznotabug.abr';
 
@@ -65,7 +73,6 @@ export const helperImage = 'offen/docker-volume-backup:latest';
 /**
  * `docker run` arguments for an ABR helper container, removed on exit. `--init` makes signals stop it.
  *
- * @param options.role the {@link abrLabel} value.
  * @param options.extra more `docker run` flags.
  */
 export function helperArgs(
@@ -75,7 +82,6 @@ export function helperArgs(
         env = [],
         name,
         workdir,
-        role = 'helper',
         extra = [],
         image = helperImage,
     },
@@ -86,7 +92,7 @@ export function helperArgs(
         '--rm',
         '--init',
         '--label',
-        `${abrLabel}=${role}`,
+        `${abrLabel}=helper`,
         ...(name ? ['--name', name] : []),
         ...extra,
         ...mounts.flatMap((mount) => ['-v', mount]),
@@ -106,15 +112,11 @@ export function appwriteDir() {
     return path.join(process.cwd(), 'appwrite');
 }
 
-let detached = false;
-
 /**
  * While ABR handles interrupts itself, docker commands run in their own process group,
  * so a Ctrl+C reaches only ABR, which then stops or finishes them. Otherwise it stops them too.
  */
-function setHandlingInterrupts(handling) {
-    detached = handling;
-}
+let detached = false;
 
 /**
  * Routes interrupts to `onInterrupt(signal)` until the returned `release` is called.
@@ -124,7 +126,7 @@ export function handleInterrupts(onInterrupt) {
     const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
     // `on`, not `once`: execa's exit hook re-raises the signal if no other listener is left.
     signals.forEach((name) => process.on(name, onInterrupt));
-    setHandlingInterrupts(true);
+    detached = true;
 
     // a hung up terminal (SIGHUP) fails writes with EIO, don't crash before the cleanup.
     const ignore = () => {};
@@ -132,7 +134,7 @@ export function handleInterrupts(onInterrupt) {
     process.stderr.on('error', ignore);
 
     return () => {
-        setHandlingInterrupts(false);
+        detached = false;
         signals.forEach((name) => process.off(name, onInterrupt));
         process.stdout.off('error', ignore);
         process.stderr.off('error', ignore);
@@ -144,30 +146,24 @@ export function docker(args, options = {}) {
 }
 
 /**
- * {@link docker} for a forced exit, in ABR's process group as `execaSync` can't detach.
+ * {@link docker} for a forced exit, best effort, in ABR's process group as `execaSync` can't detach.
  */
-export function dockerSync(args, options = {}) {
-    return execaSync('docker', args, options);
+export function dockerSync(args) {
+    return execaSync('docker', args, { reject: false });
 }
 
 /**
- * Pulls the images that aren't present yet. Throws on failure.
+ * Pulls the image if it isn't present yet. Throws on failure.
  */
-export async function pullImages(images) {
-    for (const image of images) {
-        const { failed } = await docker(['image', 'inspect', image], {
-            reject: false,
-        });
-        if (failed) await docker(['pull', image]);
-    }
+export async function pullImage(image) {
+    const { failed } = await docker(['image', 'inspect', image], {
+        reject: false,
+    });
+    if (failed) await docker(['pull', image]);
 }
 
 export function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export function sleepSync(ms) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 /**
@@ -226,56 +222,62 @@ export async function checkDocker(loader) {
 }
 
 /**
- * Restarts the appwrite stack.
- *
- * This will take a while because this also fetches all the pruned images from docker hub.
- *
- * @param onStart gets the running `docker compose` command.
- * @returns {Promise<boolean>} whether it worked.
+ * `docker compose` steps on the Appwrite stack, for {@link runCompose}.
+ * `restart` takes a while, it also fetches all the pruned images from docker hub.
+ * `harmless` is an error that counts as done.
  */
-export async function restartAppwriteStack(loader, onStart = () => {}) {
-    loader.start(chalk.blue('Restarting appwrite (This can take a while...)'));
-    try {
-        const command = docker(['compose', 'up', '-d'], { cwd: appwriteDir() });
-        onStart(command);
-        await command;
-
-        loader.stop();
-        console.log(chalk.green('✅ Appwrite stack restarted.'));
-        return true;
-    } catch (error) {
-        loader.stop();
-        console.error(
-            chalk.red('❌ Error during Appwrite restart:'),
-            error.message,
-        );
-        process.exitCode = 1;
-        return false;
-    }
-}
+export const composeSteps = {
+    stop: {
+        args: ['down'],
+        start: 'Stopping Appwrite services...',
+        done: 'Appwrite services stopped.',
+        failed: 'Error stopping Appwrite services:',
+    },
+    pause: {
+        args: ['pause'],
+        start: 'Pausing Appwrite services...',
+        done: 'Appwrite services paused.',
+        failed: 'Error pausing Appwrite services:',
+        harmless: 'already paused',
+    },
+    restart: {
+        args: ['up', '-d'],
+        start: 'Restarting appwrite (This can take a while...)',
+        done: 'Appwrite stack restarted.',
+        failed: 'Error during Appwrite restart:',
+    },
+    resume: {
+        args: ['unpause'],
+        start: 'Resuming appwrite',
+        done: 'Appwrite stack resumed.',
+        failed: 'Error during Appwrite resumption:',
+    },
+};
 
 /**
- * Resumes the appwrite stack.
+ * Runs a {@link composeSteps} step on the Appwrite stack, printing how it went.
  *
- * @param onStart gets the running `docker compose` command.
+ * @param stack gets the running command as `command`, to kill it on a forced exit.
  * @returns {Promise<boolean>} whether it worked.
  */
-export async function resumeAppwriteStack(loader, onStart = () => {}) {
-    loader.start(chalk.blue('Resuming appwrite'));
+export async function runCompose(
+    loader,
+    { args, start, done, failed, harmless },
+    stack = {},
+) {
+    loader.start(chalk.blue(start));
     try {
-        const command = docker(['compose', 'unpause'], { cwd: appwriteDir() });
-        onStart(command);
-        await command;
+        stack.command = docker(['compose', ...args], { cwd: appwriteDir() });
+        await stack.command;
 
         loader.stop();
-        console.log(chalk.green('✅ Appwrite stack resumed.'));
+        console.log(chalk.green(`✅ ${done}`));
         return true;
     } catch (error) {
         loader.stop();
-        console.error(
-            chalk.red('❌ Error during Appwrite resumption:'),
-            error.message,
-        );
+        if (harmless && error.message.includes(harmless)) return true;
+
+        console.error(chalk.red(`❌ ${failed}`), error.message);
         process.exitCode = 1;
         return false;
     }

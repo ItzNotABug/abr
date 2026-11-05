@@ -8,12 +8,13 @@ import {
     appwriteDir,
     checkDocker,
     appwriteVolumeName,
+    composeSteps,
     defaultVolumes,
     docker,
     helperArgs,
     installFiles,
-    pullImages,
-    restartAppwriteStack,
+    pullImage,
+    runCompose,
     signalExitCode,
 } from '../utils/misc.js';
 import {
@@ -128,15 +129,15 @@ export default class Restore {
 
         let restored = false;
         try {
-            const backup =
-                (await this.#pullImages(file)) &&
-                (await this.#readArchive(file, passphrase));
+            const image = this.#extractor(file);
+            loader.start(chalk.blue('Preparing the restore...'));
+            await pullImage(image);
+            loader.stop();
+
+            const backup = await this.#readArchive(file, passphrase);
             restored =
                 Boolean(backup) &&
-                (await this.#removeRemnants(
-                    backup.volumes,
-                    this.#extractor(file),
-                )) &&
+                (await this.#removeRemnants(backup.volumes, image)) &&
                 (await this.#extractArchive(
                     file,
                     backup.volumes,
@@ -144,9 +145,13 @@ export default class Restore {
                 )) &&
                 (!backup.dumped || (await this.#restoreDump(backup.adapter)));
         } catch (error) {
+            loader.stop();
             // Ctrl+C at a prompt, handled in index.js.
             if (error.name === 'ExitPromptError') throw error;
-            console.log(chalk.red('❌ Could not restore:'), error.message);
+            console.log(
+                chalk.red('❌ Could not restore:'),
+                error.stderr?.trim() || error.message,
+            );
         }
 
         if (!restored) {
@@ -162,7 +167,7 @@ export default class Restore {
         }
         this.#phase = 'restarting';
 
-        await restartAppwriteStack(loader);
+        await runCompose(loader, composeSteps.restart);
     }
 
     /**
@@ -185,59 +190,37 @@ export default class Restore {
         // volumes with other entries, e.g. a stale dump next to a cold backup's data files.
         const filled = new Set();
         const unexpected = new Set();
-        // names become `docker run -v` sources & are removed first, so only Appwrite's own volumes.
-        // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
-        // numeric owners, so a crafted user name can't look like the quoted name.
-        const entry =
-            /^(\S)\S*\s+\S+\s+\S+\s+\S+\s+\S+\s+"((?:[^"\\]|\\.)*)"(?: (?:->|link to) "(?:[^"\\]|\\.)*")?$/;
         try {
             // with the extractor's tar, which reads it the same way. streamed, archives can hold millions of files.
+            // `-P`: offen's names start with `/`, tar would warn about it. its folders have no trailing `/`, so entries are checked by name only.
             const listing = docker(
                 this.#archiveScriptArgs(
                     file,
                     [`${path.dirname(file)}:/archive:ro`],
-                    'archive_tar "$1" -tvzP --quoting-style=c --numeric-owner',
+                    'archive_tar "$1" -tzP',
                 ),
                 { buffer: { stdout: false }, input: passphrase || undefined },
             );
-            for await (const line of listing) {
-                const [, type, quoted] = line.match(entry) ?? [];
-                const name = quoted === undefined ? '' : unquote(quoted);
-                // empty parts, as in `backup//x`, are dropped by tar too.
+            for await (const name of listing) {
+                // empty parts, as in `/backup` or `backup//x`, are dropped by tar too.
                 const parts = name.split('/').filter(Boolean);
-                const [root, dir] = parts;
+                const [root, dir, child] = parts;
 
                 // GNU tar skips `..` members & fails, after the install is gone.
-                // no hard links, they can fail across volume mounts, nor devices. ABR's archives have neither.
-                if (
-                    !['d', '-', 'l', 'p'].includes(type) ||
-                    parts.includes('..')
-                ) {
-                    unexpected.add(name || line);
-                } else if (root !== 'backup') {
-                    unexpected.add(name || line);
-                } else if (parts.length <= 2 && type !== 'd') {
-                    // `backup`, a volume & `appwrite` can only be folders.
+                if (root !== 'backup' || parts.includes('..')) {
                     unexpected.add(name);
                 } else if (!dir) {
                     continue;
                 } else if (dir === 'appwrite') {
-                    // bind-mounted to the host & read by compose, ABR only writes install files there, no folders.
-                    if (parts.length === 2) continue;
-                    if (type === '-' && parts.length === 3) {
-                        files.add(parts[2]);
-                    } else {
-                        unexpected.add(name);
-                    }
+                    // bind-mounted to the host & read by compose, ABR only writes install files there, nothing nested.
+                    if (parts.length > 3) unexpected.add(name);
+                    else if (child) files.add(child);
                 } else if (appwriteVolumeName.test(dir)) {
+                    // names become `docker run -v` sources & are removed first, so only Appwrite's own volumes.
                     volumes.add(dir);
-                    if (parts.length < 3) continue;
-                    const top = `${dir}/${parts[2]}`;
-                    if (
-                        parts.length === 3 &&
-                        type === '-' &&
-                        dumpPaths.includes(top)
-                    ) {
+                    if (!child) continue;
+                    const top = `${dir}/${child}`;
+                    if (parts.length === 3 && dumpPaths.includes(top)) {
                         dumps.add(top);
                     } else {
                         filled.add(dir);
@@ -267,10 +250,8 @@ export default class Restore {
         if (unexpected.size) {
             console.log(
                 chalk.red(
-                    // quoted, names may hold control characters.
                     `❌ The backup has unexpected entries: ${[...unexpected]
                         .slice(0, 5)
-                        .map((name) => JSON.stringify(name))
                         .join(', ')}.`,
                 ),
             );
@@ -328,25 +309,6 @@ export default class Restore {
 
         console.log(chalk.green(`✅ ${adapter.name} dump restored.`));
         return true;
-    }
-
-    /**
-     * Pulls the image restoring the archive needs, before anything is removed.
-     */
-    static async #pullImages(file) {
-        loader.start(chalk.blue('Preparing the restore...'));
-        try {
-            await pullImages([this.#extractor(file)]);
-            loader.stop();
-            return true;
-        } catch (error) {
-            loader.stop();
-            console.log(
-                chalk.red('❌ Could not pull the images to restore with:'),
-                error.stderr?.trim() || error.message,
-            );
-            return false;
-        }
     }
 
     /**
@@ -589,8 +551,6 @@ export default class Restore {
                 entrypoint: 'bash',
                 image: this.#extractor(file),
                 mounts,
-                // escaped bytes for non-ASCII names in listings, whatever the image's locale.
-                env: ['LANG=C'],
                 extra: isEncrypted(file) ? ['-i'] : [],
             },
             '-c',
@@ -600,23 +560,4 @@ export default class Restore {
             ...args,
         );
     }
-}
-
-const namedEscapes = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11 };
-
-/**
- * Decodes a name quoted by GNU tar's `--quoting-style=c`, with octal escapes for non-ASCII bytes.
- */
-function unquote(quoted) {
-    if (!quoted.includes('\\')) return quoted;
-
-    // escapes become latin1 chars, i.e. single bytes, decoded as utf8 after.
-    const bytes = quoted.replace(/\\(?:([0-7]{3})|(.))/g, (_, octal, char) =>
-        String.fromCharCode(
-            octal
-                ? parseInt(octal, 8)
-                : (namedEscapes[char] ?? char.charCodeAt(0)),
-        ),
-    );
-    return Buffer.from(bytes, 'latin1').toString('utf8');
 }

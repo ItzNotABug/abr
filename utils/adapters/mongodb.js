@@ -1,4 +1,4 @@
-import { appwriteDir, docker, helperArgs } from '../misc.js';
+import { appwriteDir, docker, envValue, helperArgs } from '../misc.js';
 
 export const name = 'MongoDB';
 
@@ -50,7 +50,6 @@ export async function snapshot(database, snapshot, signal) {
                 entrypoint: 'mongodump',
                 image: database.image,
                 name: snapshot,
-                role: 'backup',
                 extra: ['-i', '--network', `container:${database.container}`],
                 mounts: [`${snapshot}:/snapshot`],
             },
@@ -102,10 +101,8 @@ chown -R mongodb:mongodb ${dataDir}`,
  * Root credentials as the image's entrypoint creates them.
  */
 function rootCredentials(env) {
-    const value = (key) =>
-        env.find((line) => line.startsWith(`${key}=`))?.slice(key.length + 1);
     return {
-        user: value('MONGO_INITDB_ROOT_USERNAME'),
-        password: value('MONGO_INITDB_ROOT_PASSWORD'),
+        user: envValue(env, 'MONGO_INITDB_ROOT_USERNAME'),
+        password: envValue(env, 'MONGO_INITDB_ROOT_PASSWORD'),
     };
 }

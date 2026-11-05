@@ -198,6 +198,13 @@ export function partialFile(file) {
 }
 
 /**
+ * offen's name for a `partial` before it appends `.gpg`: a plain archive, if it got no passphrase.
+ */
+export function plainPartial(partial) {
+    return partial.replace(/\.gpg$/, '');
+}
+
+/**
  * Warns about archives left by killed runs, they can be large.
  * Not removed, one may be complete but failed to be renamed.
  */
@@ -256,9 +263,7 @@ export function removePathSync(target) {
     try {
         fs.rmSync(target, { recursive: true, force: true });
     } catch {
-        dockerSync(rootCommand(target, ['rm', '-rf', path.basename(target)]), {
-            reject: false,
-        });
+        dockerSync(rootCommand(target, ['rm', '-rf', path.basename(target)]));
     }
 }
 

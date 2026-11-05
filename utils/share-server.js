@@ -7,13 +7,11 @@ import { formatSize } from './volumes.js';
 
 /**
  * A random URL token & Basic auth password, the user is always `abr`.
- * `probe` is a path that only answers `OK`, to check the server is reachable.
  */
 export function newCredentials() {
     const password = crypto.randomBytes(18).toString('base64url');
     return {
         token: crypto.randomBytes(24).toString('base64url'),
-        probe: crypto.randomBytes(24).toString('base64url'),
         password,
         credentials: `abr:${password}`,
     };
@@ -23,7 +21,7 @@ export function newCredentials() {
  * Serves the share's info page at `/<token>/` & its file at `/<token>/<name>`, both behind Basic auth.
  * On localhost only, the tunnel shares the host's network.
  *
- * @param share `{file, name, size, sha256, token, probe, credentials, deadline, url, active, finishedAt, expired}`.
+ * @param share `{file, name, size, sha256, token, credentials, deadline, url, active, finishedAt, expired}`.
  * `active` counts running downloads, `finishedAt` is when the last one ended, once `expired` new requests are refused.
  * @param log prints download events.
  */
@@ -80,9 +78,6 @@ function handleRequest(request, response, share, log) {
 
     // unknown paths look the same with or without credentials.
     const parts = request.url.split('?')[0].split('/');
-    if (parts.length === 2 && safeEqual(parts[1], share.probe)) {
-        return send(response, 200, ['OK.']);
-    }
     const notFound = [
         'Link not found',
         'Check that the link is complete, or ask the sender for it again.',
@@ -144,12 +139,7 @@ function send(response, code, text, headers = {}, html = false) {
  * Sends the file, or the requested range of it to resume a download.
  */
 function download(request, response, share, log) {
-    const etag = `"${share.sha256}"`;
-    const ifRange = request.headers['if-range'];
-    const range =
-        !ifRange || ifRange === etag
-            ? parseRange(request.headers.range, share.size)
-            : null;
+    const range = parseRange(request.headers.range, share.size);
     if (range === 'unsatisfiable') {
         return send(response, 416, ['Range not satisfiable.'], {
             'Content-Range': `bytes */${share.size}`,
@@ -162,7 +152,8 @@ function download(request, response, share, log) {
         'Content-Type': 'application/octet-stream',
         'Content-Length': end - start + 1,
         'Content-Disposition': `attachment; filename="${share.name.replace(/[^\w.-]/g, '_')}"`,
-        ETag: etag,
+        // browsers resume only with a validator. `If-Range` needs no check, the file never changes.
+        ETag: `"${share.sha256}"`,
         ...(range && {
             'Content-Range': `bytes ${start}-${end}/${share.size}`,
         }),
@@ -188,27 +179,17 @@ function download(request, response, share, log) {
 }
 
 /**
- * A single `bytes=` range, `null` to send the whole file, as for multiple or invalid ranges.
+ * A single `bytes=N-` or `bytes=N-M` range, as curl resumes with. `null` sends the whole file, as for other ranges.
  *
  * @returns {{start: number, end: number}|'unsatisfiable'|null}
  */
 function parseRange(header, size) {
-    const match = /^bytes=(\d*)-(\d*)$/.exec(header ?? '');
-    if (!match || (!match[1] && !match[2])) return null;
-
-    const [, first, last] = match;
-    if (!first) {
-        // a suffix, the last n bytes.
-        const length = Number(last);
-        return length
-            ? { start: Math.max(0, size - length), end: size - 1 }
-            : 'unsatisfiable';
-    }
+    const [, first, last] = /^bytes=(\d+)-(\d*)$/.exec(header ?? '') ?? [];
+    if (!first || (last && Number(last) < Number(first))) return null;
 
     const start = Number(first);
-    const end = last ? Math.min(Number(last), size - 1) : size - 1;
-    if (last && Number(last) < start) return null;
-    return start < size ? { start, end } : 'unsatisfiable';
+    if (start >= size) return 'unsatisfiable';
+    return { start, end: last ? Math.min(Number(last), size - 1) : size - 1 };
 }
 
 /**

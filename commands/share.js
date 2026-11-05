@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import chalk from 'chalk';
 import * as path from 'path';
 import loading from 'loading-cli';
+import { setTimeout as wait } from 'timers/promises';
 import { handleInterrupts, signalExitCode } from '../utils/misc.js';
 import {
     hashFile,
@@ -83,13 +84,12 @@ export default class Share {
             return;
         }
 
-        const { token, probe, password, credentials } = newCredentials();
+        const { token, password, credentials } = newCredentials();
         const share = {
             file,
             name: path.basename(file),
             ...prepared,
             token,
-            probe,
             credentials,
             deadline: 0,
             url: '',
@@ -180,7 +180,7 @@ export default class Share {
     /**
      * Serves the file on localhost, exposed by a quick tunnel, until it expires or is interrupted.
      *
-     * @param lifetime of the link, from when it works.
+     * @param lifetime of the link, from when the tunnel is up.
      */
     static async #share(share, password, lifetime) {
         let server;
@@ -208,61 +208,40 @@ export default class Share {
             loader.start(chalk.blue('Starting the tunnel...'));
             const { port } = server.address();
 
-            // trycloudflare's API times out at times & tunnels may drop right after connecting, a new one usually works.
-            // the link is printed once it opens, or after a minute: this machine's DNS may cache the new name's absence.
+            // trycloudflare's API times out at times, a new tunnel usually works.
             const attempts = 5;
             let url = null;
-            let reachable = false;
             for (let attempt = 1; attempt <= attempts; attempt++) {
-                if (tunnel) await stopTunnel(tunnel);
                 if (attempt > 1) {
+                    await stopTunnel(tunnel);
                     loader.text = chalk.blue(
                         `Starting the tunnel, attempt ${attempt} of ${attempts}...`,
                     );
-                    await Promise.race([wait(2000 * attempt), stopped]);
+                    // unref'd, to exit at once when stopped meanwhile.
+                    await Promise.race([
+                        wait(2000 * (attempt - 1), undefined, { ref: false }),
+                        stopped,
+                    ]);
                 }
                 if (interrupted) break;
 
                 tunnel = startTunnel(port);
-                // the share stopping or the tunnel exiting ends the waits below.
-                const ended = Promise.race([stopped, tunnel.exited]);
                 try {
                     url = await Promise.race([
                         tunnel.url,
-                        ended.then(() => null),
+                        stopped.then(() => null),
                     ]);
-                    reachable =
-                        url !== null &&
-                        (await reachesPublicly(`${url}/${share.probe}`, ended));
+                    break;
                 } catch (error) {
-                    url = null;
-                    if (attempt === attempts) {
-                        throw error;
-                    }
-                    continue;
-                }
-                if (interrupted) break;
-                // a running tunnel is kept, its link confirmed or not.
-                if (url !== null && !tunnel.done) break;
-                url = null;
-                if (attempt === attempts) {
-                    throw new Error('the tunnel stopped.');
+                    if (attempt === attempts) throw error;
                 }
             }
-            if (interrupted) url = null;
             loader.stop();
 
-            if (url) {
+            if (url && !interrupted) {
                 share.url = url;
                 share.deadline = Date.now() + lifetime;
                 printShare(share, password);
-                if (!reachable) {
-                    console.log(
-                        chalk.yellow(
-                            '⚠️  Could not open the link from here yet, it usually works within a minute.',
-                        ),
-                    );
-                }
                 // the tunnel ending early stops the share too.
                 // after expiry it may end while downloads finish, which is no failure.
                 tunnel.exited.then(() =>
@@ -312,6 +291,8 @@ function printShare(share, password) {
             `   curl:      ${curlCommand(share)}`,
         ].join('\n'),
     );
+    // a new tunnel name takes a while to resolve everywhere.
+    console.log(chalk.yellow('⚠️  The link may take a minute to work.'));
     console.log(
         chalk.yellow(
             '⚠️  The password is shown only once. Send it apart from the link, along with the backup passphrase.',
@@ -424,40 +405,4 @@ function formatRemaining(ms) {
     return hours
         ? `${hours}:${pad(minutes)}:${pad(seconds)}`
         : `${minutes}:${pad(seconds)}`;
-}
-
-/**
- * Whether the URL answers through the tunnel within a minute, `false` once `ended`.
- */
-async function reachesPublicly(url, ended) {
-    let done = false;
-    let controller;
-    ended.then(() => {
-        done = true;
-        controller?.abort();
-    });
-    for (const deadline = Date.now() + 60_000; Date.now() < deadline; ) {
-        if (done) return false;
-        controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000);
-        try {
-            const response = await fetch(url, { signal: controller.signal });
-            // read, an unread body keeps its connection.
-            await response.body?.cancel();
-            if (response.ok) return true;
-        } catch {
-            // not resolvable or reachable yet.
-        } finally {
-            clearTimeout(timeout);
-        }
-        await Promise.race([wait(2000), ended]);
-    }
-    return false;
-}
-
-/**
- * A sleep that doesn't keep ABR running once the share stopped.
- */
-function wait(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms).unref());
 }

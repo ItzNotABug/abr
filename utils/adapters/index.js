@@ -6,14 +6,22 @@ import {
     helperArgs,
     sleep,
     sleepSync,
-} from './misc.js';
+} from '../misc.js';
+import * as mariadb from './mariadb.js';
+import * as mongodb from './mongodb.js';
 
 /**
- * Returns the MariaDB container's `status`, `image` id & `env`, or `null` if it doesn't exist.
+ * Supported databases by `_APP_DB_ADAPTER`, each with its `name`, `volume`, compose service `image`, `dataDir`, `skipped` files & `snapshot`.
+ * MongoDB's snapshot is a dump, restored via its `dumpFile` & `restoreDump`.
+ */
+export const adapters = { mariadb, mongodb };
+
+/**
+ * Returns the database container's `status`, `image` id & `env`, or `null` if it doesn't exist.
  *
  * Throws on any other failure, callers must not mistake it for a stopped database.
  */
-export async function inspectMariaDB(container) {
+export async function inspectDatabase(container) {
     const { failed, stdout, stderr } = await docker(
         ['container', 'inspect', container],
         { reject: false },
@@ -36,9 +44,9 @@ export async function inspectMariaDB(container) {
 }
 
 /**
- * Whether a running or paused container other than MariaDB's uses its volume. Throws if unknown.
+ * Whether a running or paused container other than the database uses its volume. Throws if unknown.
  */
-export async function isMariaDBVolumeUsedByOthers({ container, volume }) {
+export async function isVolumeUsedByOthers({ container, volume }) {
     const { failed, stdout, stderr } = await docker(
         ['ps', '--format', '{{.Names}}', '--filter', `volume=${volume}`],
         { reject: false },
@@ -51,9 +59,9 @@ export async function isMariaDBVolumeUsedByOthers({ container, volume }) {
 /**
  * Lists the volume's files with sizes & change times, any write changes it. Throws on failure.
  *
- * Stopped MariaDBs are copied as is, this tells if one wrote during the copy, e.g. started or unpaused briefly.
+ * Stopped databases are copied as is, this tells if one wrote during the copy, e.g. started or unpaused briefly.
  */
-export async function listMariaDBFiles({ volume }) {
+export async function listDatabaseFiles({ volume }) {
     const { stdout } = await docker(
         helperArgs(
             {
@@ -78,24 +86,24 @@ export async function listMariaDBFiles({ volume }) {
  * Returns the snapshot container & volume name for a backup.
  */
 export function snapshotName(id) {
-    return `abr-mariadb-snapshot-${id}`;
+    return `abr-db-snapshot-${id}`;
 }
 
 /**
- * Takes a consistent snapshot of the running MariaDB via `mariadb-backup`, `--prepare`d so it restores like a plain volume.
+ * Takes a consistent snapshot of the running database via its adapter. The caller removes the snapshot.
  *
- * Uses the live container's image, so tool & server versions always match. The caller removes the snapshot.
- *
+ * @param database the compose `adapter`, `container` & `volume`, with {@link inspectDatabase}'s state.
  * @returns {Promise<boolean>} `true` if the snapshot is ready, `false` if it failed or `signal` aborted.
  */
-export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
-    loader.start(chalk.blue('Creating MariaDB snapshot...'));
+export async function snapshotDatabase(loader, database, snapshot, signal) {
+    const { name } = database.adapter;
+    loader.start(chalk.blue(`Creating ${name} snapshot...`));
 
     const fail = (message, suggestOtherTypes = true) => {
         loader.stop();
         if (signal.aborted) return false;
 
-        console.log(chalk.red('❌ Error creating MariaDB snapshot:'), message);
+        console.log(chalk.red(`❌ Error creating ${name} snapshot:`), message);
         if (suggestOtherTypes) {
             console.log(
                 chalk.yellow('⚠️  Try a semi-hot or cold backup instead.'),
@@ -103,13 +111,6 @@ export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
         }
         return false;
     };
-
-    const credentials = rootCredentials(mariadb.env);
-    if (!credentials) {
-        return fail(
-            `MariaDB root password not found in ${mariadb.container} environment.`,
-        );
-    }
 
     // e.g. a sidecar of a killed run, still holding backup locks & disk space.
     const running = await docker(
@@ -138,47 +139,7 @@ export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
                 cancelSignal: signal,
             },
         );
-
-        // password via env, not argv, to keep it out of `ps`. `--init` forwards signals.
-        await docker(
-            helperArgs(
-                {
-                    entrypoint: 'sh',
-                    image: mariadb.image,
-                    name: snapshot,
-                    role: 'backup',
-                    extra: [
-                        '--volumes-from',
-                        `${mariadb.container}:ro`,
-                        '--network',
-                        `container:${mariadb.container}`,
-                    ],
-                    mounts: [`${snapshot}:/snapshot`],
-                    env: ['MYSQL_PWD', 'ABR_PASSWORD_FILE'],
-                },
-                '-c',
-                [
-                    'set -e',
-                    'if [ -n "$ABR_PASSWORD_FILE" ]; then MYSQL_PWD="$(cat "$ABR_PASSWORD_FILE")"; export MYSQL_PWD; fi',
-                    // per-table logs get huge, keep only the tail for errors.
-                    'run() { "$@" > /tmp/abr.log 2>&1 || { tail -n 20 /tmp/abr.log >&2; exit 1; }; }',
-                    // backup locks only wait on explicit `LOCK TABLES`, fail instead of hanging on them.
-                    // `ftwrl-wait-timeout` over its newer `startup-wait-timeout` alias, older images only know the former.
-                    'run mariadb-backup --backup --ftwrl-wait-timeout=60 --target-dir=/snapshot --host=127.0.0.1 --port=3306 --user=root',
-                    'run mariadb-backup --prepare --target-dir=/snapshot',
-                    // skipped by mariadb-backup, needed by the image's healthcheck & upgrade logic.
-                    'for f in .my-healthcheck.cnf mysql_upgrade_info mariadb_upgrade_info multi-master.info; do [ -f "/var/lib/mysql/$f" ] && cp -p "/var/lib/mysql/$f" /snapshot/; done',
-                    'chown -R mysql:mysql /snapshot',
-                ].join('\n'),
-            ),
-            {
-                cancelSignal: signal,
-                env: {
-                    MYSQL_PWD: credentials.password,
-                    ABR_PASSWORD_FILE: credentials.passwordFile,
-                },
-            },
-        );
+        await database.adapter.snapshot(database, snapshot, signal);
     } catch (error) {
         // execa's messages include the whole command.
         return fail(
@@ -190,7 +151,7 @@ export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
     }
 
     loader.stop();
-    console.log(chalk.green('✅ MariaDB snapshot created.'));
+    console.log(chalk.green(`✅ ${name} snapshot created.`));
     return true;
 }
 
@@ -198,9 +159,12 @@ export async function snapshotMariaDB(loader, mariadb, snapshot, signal) {
  * Removes the snapshot container & volume, warns if the volume is left behind.
  *
  * Also stops the given `containers`, e.g. an archive container still using the volume.
+ * `-v` removes their anonymous volumes too, e.g. of the database image's `VOLUME`s.
  */
-export async function removeMariaDBSnapshot(snapshot, ...containers) {
-    await docker(['rm', '-f', snapshot, ...containers], { reject: false });
+export async function removeSnapshot(snapshot, ...containers) {
+    await docker(['rm', '-f', '-v', snapshot, ...containers], {
+        reject: false,
+    });
 
     // stays in use briefly while an interrupted sidecar is torn down.
     for (let attempt = 0; attempt < 10; attempt++) {
@@ -215,10 +179,12 @@ export async function removeMariaDBSnapshot(snapshot, ...containers) {
 }
 
 /**
- * {@link removeMariaDBSnapshot} for a forced exit.
+ * {@link removeSnapshot} for a forced exit.
  */
-export function removeMariaDBSnapshotSync(snapshot, ...containers) {
-    dockerSync(['rm', '-f', snapshot, ...containers], { reject: false });
+export function removeSnapshotSync(snapshot, ...containers) {
+    dockerSync(['rm', '-f', '-v', snapshot, ...containers], {
+        reject: false,
+    });
 
     for (let attempt = 0; attempt < 10; attempt++) {
         const { exitCode } = dockerSync(['volume', 'rm', '-f', snapshot], {
@@ -256,24 +222,7 @@ export async function warnLeftoverSnapshots() {
 
     console.log(
         chalk.yellow(
-            `⚠️  Found MariaDB snapshots from interrupted backups, they hold full database copies. If no other backup is running, remove them via "docker volume rm ${leftovers.join(' ')}".`,
+            `⚠️  Found database snapshots from interrupted backups, they hold full database copies. If no other backup is running, remove them via "docker volume rm ${leftovers.join(' ')}".`,
         ),
     );
-}
-
-/**
- * Root credentials like the image's entrypoint: `MARIADB_*` over `MYSQL_*`, each a value or a `*_FILE`.
- */
-function rootCredentials(env) {
-    const value = (key) =>
-        env.find((line) => line.startsWith(`${key}=`))?.slice(key.length + 1) ||
-        undefined;
-
-    for (const prefix of ['MARIADB', 'MYSQL']) {
-        const password = value(`${prefix}_ROOT_PASSWORD`);
-        const passwordFile = value(`${prefix}_ROOT_PASSWORD_FILE`);
-        if (password) return { password, passwordFile: '' };
-        if (passwordFile) return { password: '', passwordFile };
-    }
-    return null;
 }

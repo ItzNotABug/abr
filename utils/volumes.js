@@ -20,10 +20,11 @@ export async function existingVolumes(volumes) {
  * Filesystems are identified by their size: the overlay `/tmp` & btrfs subvolumes report other ids for the same disk.
  *
  * @param volumes existing volumes.
- * @param mariadbVolume MariaDB's volume, to measure the files its snapshots skip.
+ * @param databaseVolume the database's volume.
+ * @param globs the files in it that its snapshots skip, measured as `skipped`.
  * @returns {Promise<{sizes: Map<string, number>, skipped: number, tmp: Disk, scratch: Disk, archive: Disk}>} with `Disk` as `{id, free}`.
  */
-export async function measureVolumes(volumes, mariadbVolume) {
+export async function measureVolumes(volumes, databaseVolume, globs) {
     fs.mkdirSync(backupsDir(), { recursive: true });
 
     const { stdout } = await docker(
@@ -47,9 +48,10 @@ export async function measureVolumes(volumes, mariadbVolume) {
                 'echo --',
                 'stat -f -c "%b %a %S" /tmp /scratch /archive',
                 'echo --',
-                'du -sck "$0"/ibtmp1 "$0"/ib_logfile* 2>/dev/null | tail -n 1',
+                // `/dev/null` counts as 0, without files du would measure the folder.
+                `du -sck ${globs.map((glob) => `"$0"/${glob}`).join(' ')} /dev/null 2>/dev/null | tail -n 1`,
             ].join('\n'),
-            mariadbVolume,
+            databaseVolume,
             ...volumes,
         ),
     );
@@ -111,15 +113,22 @@ export function printVolumeSizes({ sizes }, volumes, excluded = []) {
  * The whole archive is estimated without compression, so the user may go ahead anyway.
  *
  * @param measure from {@link measureVolumes}.
- * @param mariadbVolume MariaDB's volume.
- * @param snapshotted whether MariaDB is snapshotted first, which skips temp & redo log files.
+ * @param databaseVolume the database's volume.
+ * @param snapshotted whether the database is snapshotted first, which skips the measured `skipped` files.
  * @param encrypted whether the archive is encrypted, offen keeps both copies in its `/tmp` meanwhile.
+ * @param dumped whether the snapshot is a compressed dump, the volume's size then covers it & its archived copy.
  * @returns {'ok'|'snapshot'|'archive'} what may not fit.
  */
-export function checkDiskSpace(measure, mariadbVolume, snapshotted, encrypted) {
+export function checkDiskSpace(
+    measure,
+    databaseVolume,
+    snapshotted,
+    encrypted,
+    dumped,
+) {
     const skipped = snapshotted ? measure.skipped : 0;
     const snapshot = snapshotted
-        ? measure.sizes.get(mariadbVolume) - skipped
+        ? measure.sizes.get(databaseVolume) - skipped
         : 0;
     const total =
         [...measure.sizes.values()].reduce((a, b) => a + b, 0) - skipped;
@@ -133,7 +142,7 @@ export function checkDiskSpace(measure, mariadbVolume, snapshotted, encrypted) {
                     ...measure.scratch,
                     free: Math.min(measure.scratch.free, measure.tmp.free),
                 },
-                snapshot * 2,
+                dumped ? snapshot : snapshot * 2,
             ],
         ])
     ) {

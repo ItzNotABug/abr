@@ -12,7 +12,6 @@ import {
     docker,
     helperArgs,
     installFiles,
-    mariadbVolume,
     pullImages,
     restartAppwriteStack,
     signalExitCode,
@@ -24,6 +23,7 @@ import {
     removePath,
     selectBackup,
 } from '../utils/archives.js';
+import { adapters } from '../utils/adapters/index.js';
 import { cacheVolumes, readCompose } from '../utils/compose.js';
 import { existingVolumes } from '../utils/volumes.js';
 import { acquireLock } from '../utils/lock.js';
@@ -128,13 +128,21 @@ export default class Restore {
 
         let restored = false;
         try {
-            const volumes =
+            const backup =
                 (await this.#pullImages(file)) &&
                 (await this.#readArchive(file, passphrase));
             restored =
-                Boolean(volumes) &&
-                (await this.#removeRemnants(volumes, this.#extractor(file))) &&
-                (await this.#extractArchive(file, volumes, passphrase));
+                Boolean(backup) &&
+                (await this.#removeRemnants(
+                    backup.volumes,
+                    this.#extractor(file),
+                )) &&
+                (await this.#extractArchive(
+                    file,
+                    backup.volumes,
+                    passphrase,
+                )) &&
+                (!backup.dumped || (await this.#restoreDump(backup.adapter)));
         } catch (error) {
             // Ctrl+C at a prompt, handled in index.js.
             if (error.name === 'ExitPromptError') throw error;
@@ -161,13 +169,21 @@ export default class Restore {
      * Reads the whole archive, which also checks its compression & encryption.
      *
      * @param passphrase decrypts the archive, if encrypted.
-     * @returns {Promise<string[]|null>} the volumes in it, `null` with the reason printed if it's unusable.
+     * @returns {Promise<{volumes: string[], adapter: object, dumped: boolean}|null>} the volumes in it, its install's database
+     * & whether that's a dump, `null` with the reason printed if it's unusable.
      */
     static async #readArchive(file, passphrase) {
         loader.start(chalk.blue('Checking the backup...'));
 
         const volumes = new Set();
-        const appwriteFiles = new Set();
+        const files = new Set();
+        // database dumps in place of a volume's files, as `<volume>/<dumpFile>`.
+        const dumpPaths = Object.values(adapters)
+            .filter(({ dumpFile }) => dumpFile)
+            .map(({ volume, dumpFile }) => `${volume}/${dumpFile}`);
+        const dumps = new Set();
+        // volumes with other entries, e.g. a stale dump next to a cold backup's data files.
+        const filled = new Set();
         const unexpected = new Set();
         // names become `docker run -v` sources & are removed first, so only Appwrite's own volumes.
         // GNU tar's verbose listing: type & mode, owner, size, date, time, then the C-quoted name.
@@ -206,19 +222,26 @@ export default class Restore {
                 } else if (!dir) {
                     continue;
                 } else if (dir === 'appwrite') {
-                    // bind-mounted to the host & read by compose, ABR only writes the two files there.
+                    // bind-mounted to the host & read by compose, ABR only writes install files there, no folders.
                     if (parts.length === 2) continue;
-                    if (
-                        type === '-' &&
-                        parts.length === 3 &&
-                        installFiles.includes(parts[2])
-                    ) {
-                        appwriteFiles.add(parts[2]);
+                    if (type === '-' && parts.length === 3) {
+                        files.add(parts[2]);
                     } else {
                         unexpected.add(name);
                     }
                 } else if (appwriteVolumeName.test(dir)) {
                     volumes.add(dir);
+                    if (parts.length < 3) continue;
+                    const top = `${dir}/${parts[2]}`;
+                    if (
+                        parts.length === 3 &&
+                        type === '-' &&
+                        dumpPaths.includes(top)
+                    ) {
+                        dumps.add(top);
+                    } else {
+                        filled.add(dir);
+                    }
                 } else {
                     unexpected.add(`backup/${dir}`);
                 }
@@ -254,9 +277,7 @@ export default class Restore {
             return null;
         }
 
-        const missing = [...installFiles, mariadbVolume].filter(
-            (name) => !appwriteFiles.has(name) && !volumes.has(name),
-        );
+        const missing = installFiles.filter((name) => !files.has(name));
         if (missing.length) {
             console.log(
                 chalk.red(`❌ The backup is missing ${missing.join(' & ')}.`),
@@ -264,8 +285,49 @@ export default class Restore {
             return null;
         }
 
+        // the backed up install's database: the one with a dump, else with a volume. installs before 1.9 always run MariaDB.
+        // a hot backup's database volume holds only its dump.
+        const dumped = (volume, dumpFile) =>
+            dumps.has(`${volume}/${dumpFile}`) && !filled.has(volume);
+        const candidates = Object.values(adapters);
+        const adapter =
+            candidates.find(({ volume, dumpFile }) =>
+                dumped(volume, dumpFile),
+            ) ?? candidates.find(({ volume }) => volumes.has(volume));
+        if (!adapter) {
+            console.log(chalk.red('❌ The backup has no database volume.'));
+            return null;
+        }
+
         console.log(chalk.green('✅ Backup checked.'));
-        return [...volumes];
+        return {
+            volumes: [...volumes],
+            adapter,
+            dumped: dumped(adapter.volume, adapter.dumpFile),
+        };
+    }
+
+    /**
+     * Loads the database dump of a hot backup, after it was extracted. Appwrite's other services stay stopped.
+     */
+    static async #restoreDump(adapter) {
+        loader.start(chalk.blue(`Restoring the ${adapter.name} dump...`));
+        try {
+            // the restored install's service for the database.
+            const { database } = await readCompose();
+            await adapter.restoreDump(database.service);
+            loader.stop();
+        } catch (error) {
+            loader.stop();
+            console.error(
+                chalk.red(`❌ Error restoring the ${adapter.name} dump:`),
+                error.stderr?.trim() || error.message,
+            );
+            return false;
+        }
+
+        console.log(chalk.green(`✅ ${adapter.name} dump restored.`));
+        return true;
     }
 
     /**
@@ -359,7 +421,8 @@ export default class Restore {
         try {
             const containers = names('Container');
             if (containers.length) {
-                await docker(['rm', '-f', ...containers]);
+                // with their anonymous volumes, e.g. of MongoDB's image `VOLUME`s.
+                await docker(['rm', '-f', '-v', ...containers]);
             }
             const volumeNames = names('Volume');
             if (volumeNames.length) {

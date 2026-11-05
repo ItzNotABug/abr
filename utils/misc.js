@@ -39,15 +39,12 @@ export const defaultVolumes = [
     'functions',
     'imports',
     'mariadb',
+    'mongodb',
+    'mongodb-keyfile',
     'redis',
     'sites',
     'uploads',
 ].map((name) => `appwrite_appwrite-${name}`);
-
-/**
- * MariaDB's volume in supported installs.
- */
-export const mariadbVolume = 'appwrite_appwrite-mariadb';
 
 /**
  * Install files archived with the volumes, from the `appwrite` folder.

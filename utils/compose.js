@@ -1,10 +1,8 @@
 import chalk from 'chalk';
-import {
-    appwriteDir,
-    appwriteVolumeName,
-    docker,
-    mariadbVolume,
-} from './misc.js';
+import * as fs from 'fs';
+import * as path from 'path';
+import { adapters } from './adapters/index.js';
+import { appwriteDir, appwriteVolumeName, docker } from './misc.js';
 
 /**
  * Compose keys of volumes that aren't backed up, as they hold re-downloadable caches.
@@ -15,7 +13,9 @@ export const cacheVolumes = ['appwrite-models'];
 /**
  * Reads the Appwrite install's compose config, resolved by compose itself: `.env`, shell overrides, quoting & comments.
  *
- * @returns {Promise<{project: string, adapter: string, mariadb: {container: string, volume: string|undefined}|null, volumes: string[], excluded: string[], others: string[]}>}
+ * @returns {Promise<{project: string, database: {adapter: object|null, container: string|undefined, volume: string|undefined, files: string[]}, volumes: string[], excluded: string[], others: string[]}>}
+ * `database` is the service of the `_APP_DB_ADAPTER`, its `adapter` from {@link adapters} or `null` if unsupported.
+ * Its `files` are the ones it mounts from the `appwrite` folder, archived with it.
  * `volumes` are Appwrite's volumes to back up, `excluded` its caches & `others` volumes added to the install, neither backed up.
  * @throws when compose fails or prints something unexpected.
  */
@@ -34,29 +34,46 @@ export async function readCompose() {
             .filter(([key]) => cacheVolumes.includes(key) === excluded)
             .map(([, name]) => name);
 
+    // installs before 1.9 have no adapter setting & always run MariaDB.
+    const name =
+        services
+            .map(([, service]) => service.environment?._APP_DB_ADAPTER)
+            .find(Boolean) ?? 'mariadb';
+    const adapter = Object.hasOwn(adapters, name) ? adapters[name] : null;
     const [key, service] =
-        services.find(([, service]) =>
-            /(^|\/)mariadb(:|@|$)/.test(service.image ?? ''),
-        ) ?? [];
-    const source = service?.volumes?.find(
+        (adapter &&
+            services.find(([, service]) =>
+                adapter.image.test(service.image ?? ''),
+            )) ??
+        [];
+    const mounts = service?.volumes ?? [];
+    const source = mounts.find(
         (volume) =>
-            volume.type === 'volume' && volume.target === '/var/lib/mysql',
+            volume.type === 'volume' && volume.target === adapter.dataDir,
     )?.source;
 
     return {
         project: config.name,
-        // installs before 1.9 have no adapter setting & always run MariaDB.
-        adapter:
-            services
-                .map(([, service]) => service.environment?._APP_DB_ADAPTER)
-                .find(Boolean) ?? (service ? 'mariadb' : 'unknown'),
-        mariadb: service
-            ? {
-                  container:
-                      service.container_name ?? `${config.name}-${key}-1`,
-                  volume: source && (config.volumes?.[source]?.name ?? source),
-              }
-            : null,
+        database: {
+            adapter,
+            service: key,
+            container:
+                service &&
+                (service.container_name ?? `${config.name}-${key}-1`),
+            volume: source && (config.volumes?.[source]?.name ?? source),
+            // e.g. MongoDB's entrypoint & init script.
+            files: mounts
+                .filter(
+                    (mount) =>
+                        mount.type === 'bind' &&
+                        // files only, a folder or a missing file can't be archived as one.
+                        isFile(mount.source) &&
+                        // real paths, compose may resolve a symlinked folder.
+                        realPath(path.dirname(mount.source)) ===
+                            realPath(appwriteDir()),
+                )
+                .map((mount) => path.basename(mount.source)),
+        },
         volumes: names(false),
         excluded: names(true),
         others: named
@@ -80,20 +97,25 @@ export async function readBackupCompose() {
         return null;
     }
 
-    if (compose.adapter !== 'mariadb') {
+    const { adapter } = compose.database;
+    if (!adapter) {
         console.error(
             chalk.red(
-                `❌ Unsupported database: ${compose.adapter}. Only MariaDB based Appwrite installs are supported.`,
+                `❌ Unsupported database, see _APP_DB_ADAPTER. Only ${Object.values(
+                    adapters,
+                )
+                    .map(({ name }) => name)
+                    .join(' & ')} based Appwrite installs are supported.`,
             ),
         );
         return null;
     }
 
     // e.g. a bind mount or a renamed volume, which restores wouldn't bring back.
-    if (compose.mariadb?.volume !== mariadbVolume) {
+    if (compose.database.volume !== adapter.volume) {
         console.error(
             chalk.red(
-                `❌ Unsupported MariaDB data volume: ${compose.mariadb?.volume ?? 'none'}. Expected "${mariadbVolume}".`,
+                `❌ Unsupported ${adapter.name} data volume: ${compose.database.volume ?? 'none'}. Expected "${adapter.volume}".`,
             ),
         );
         return null;
@@ -108,4 +130,26 @@ export async function readBackupCompose() {
     }
 
     return compose;
+}
+
+/**
+ * The path with symlinks resolved, as is if it doesn't exist.
+ */
+function realPath(target) {
+    try {
+        return fs.realpathSync(target);
+    } catch {
+        return target;
+    }
+}
+
+/**
+ * Whether `target` is a regular file, `false` if it can't be read.
+ */
+function isFile(target) {
+    try {
+        return fs.statSync(target).isFile();
+    } catch {
+        return false;
+    }
 }

@@ -1,4 +1,4 @@
-import { docker, envValue, helperArgs } from '../misc.js';
+import { docker, envValue, helperArgs, raiseOpenFiles } from '../misc.js';
 
 export const name = 'MariaDB';
 
@@ -60,6 +60,7 @@ export async function snapshot(database, snapshot, signal) {
             '-c',
             [
                 'set -e',
+                raiseOpenFiles,
                 // per-table logs get huge, keep only the tail for errors.
                 'run() { "$@" > /tmp/abr.log 2>&1 || { tail -n 20 /tmp/abr.log >&2; exit 1; }; }',
                 // backup locks only wait on explicit `LOCK TABLES`, fail instead of hanging on them.

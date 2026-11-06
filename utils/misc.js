@@ -71,6 +71,13 @@ export const abrLabel = 'com.itznotabug.abr';
 const helperImage = 'offen/docker-volume-backup:latest';
 
 /**
+ * Shell line raising the soft open files limit to the hard one, as databases need about one per table file & Docker often defaults to 1024.
+ * Capped, as the hard limit can be huge & MariaDB's tools allocate memory per allowed file.
+ */
+export const raiseOpenFiles =
+    'hard=$(ulimit -Hn); { [ "$hard" = unlimited ] || [ "$hard" -gt 1048576 ]; } && hard=1048576; ulimit -n "$hard" || true';
+
+/**
  * `docker run` arguments for an ABR helper container, removed on exit. `--init` makes signals stop it.
  *
  * @param options.extra more `docker run` flags.

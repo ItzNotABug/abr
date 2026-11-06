@@ -1,4 +1,10 @@
-import { appwriteDir, docker, envValue, helperArgs } from '../misc.js';
+import {
+    appwriteDir,
+    docker,
+    envValue,
+    helperArgs,
+    raiseOpenFiles,
+} from '../misc.js';
 
 export const name = 'MongoDB';
 
@@ -87,6 +93,7 @@ export async function restoreDump(service) {
             '-c',
             // `--stopOnError`, mongorestore otherwise skips documents it can't insert & still exits 0.
             `set -e
+${raiseOpenFiles}
 fail() { tail -n 20 "$1" >&2; exit 1; }
 mongod --dbpath ${dataDir} --bind_ip 127.0.0.1 --fork --logpath /tmp/mongod.log --quiet >/dev/null || fail /tmp/mongod.log
 mongorestore --stopOnError --archive=${dataDir}/${dumpFile} --gzip --oplogReplay 2>/tmp/mongorestore.log || fail /tmp/mongorestore.log

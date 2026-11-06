@@ -469,6 +469,21 @@ export default class Restore {
                 ? `${process.getuid()}:${process.getgid()}`
                 : '';
         try {
+            // with compose's labels, it warns on every `up` about volumes it didn't create.
+            await Promise.all(
+                volumes.map((volume) =>
+                    docker([
+                        'volume',
+                        'create',
+                        '--label',
+                        'com.docker.compose.project=appwrite',
+                        '--label',
+                        `com.docker.compose.volume=${volume.replace('appwrite_', '')}`,
+                        volume,
+                    ]),
+                ),
+            );
+
             // docker creates the missing `appwrite` folder, as root.
             await docker(
                 this.#archiveScriptArgs(

@@ -37,7 +37,7 @@ export async function readCompose() {
     // installs before 1.9 have no adapter setting & always run MariaDB.
     const name =
         services
-            .map(([, service]) => service.environment?._APP_DB_ADAPTER)
+            .map(([, service]) => service.environment?.['_APP_DB_ADAPTER'])
             .find(Boolean) ?? 'mariadb';
     const adapter = Object.hasOwn(adapters, name) ? adapters[name] : null;
     const [key, service] =

@@ -118,20 +118,26 @@ export default class Backup {
         let measure;
         try {
             volumes = await existingVolumes(compose.volumes);
-            if (!volumes.includes(database.volume)) {
-                throw new Error(
-                    `${database.adapter.name}'s volume "${database.volume}" does not exist.`,
+            if (volumes.includes(database.volume)) {
+                measure = await measureVolumes(
+                    volumes,
+                    database.volume,
+                    database.adapter.skipped,
                 );
             }
-            measure = await measureVolumes(
-                volumes,
-                database.volume,
-                database.adapter.skipped,
-            );
             loader.stop();
         } catch (error) {
             loader.stop();
             printError('Error checking volume sizes:', error);
+            process.exitCode = 1;
+            return;
+        }
+        if (!measure) {
+            console.log(
+                chalk.red(
+                    `❌ ${database.adapter.name}'s volume "${database.volume}" does not exist.`,
+                ),
+            );
             process.exitCode = 1;
             return;
         }
@@ -365,6 +371,7 @@ export default class Backup {
     /**
      * Archives the volumes.
      *
+     * @param options what to archive & how.
      * @param options.volumes volumes to archive.
      * @param options.files files to archive from the `appwrite` folder.
      * @param options.replace volumes to archive from another volume, e.g. the database's snapshot.

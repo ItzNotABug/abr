@@ -166,6 +166,7 @@ export default class Restore {
     /**
      * Reads the whole archive, which also checks its compression & encryption.
      *
+     * @param file the backup's path.
      * @param passphrase decrypts the archive, if encrypted.
      * @returns {Promise<{volumes: string[], dump: object|null}|null>} the volumes in it & the adapter of the database dump it holds,
      * if any. `null` with the reason printed if it's unusable.
@@ -200,15 +201,14 @@ export default class Restore {
                 const [root, dir, child] = parts;
 
                 // GNU tar skips `..` members & fails, after the install is gone.
+                // `backup` itself has no `dir`.
                 if (root !== 'backup' || parts.includes('..')) {
                     unexpected.add(name);
-                } else if (!dir) {
-                    continue;
                 } else if (dir === 'appwrite') {
                     // bind-mounted to the host & read by compose, ABR only writes install files there, nothing nested.
                     if (parts.length > 3) unexpected.add(name);
                     else if (child) files.add(child);
-                } else if (appwriteVolumeName.test(dir)) {
+                } else if (dir && appwriteVolumeName.test(dir)) {
                     // names become `docker run -v` sources & are removed first, so only Appwrite's own volumes.
                     volumes.add(dir);
                     if (!child) continue;
@@ -218,7 +218,7 @@ export default class Restore {
                     } else {
                         filled.add(dir);
                     }
-                } else {
+                } else if (dir) {
                     unexpected.add(`backup/${dir}`);
                 }
             }
@@ -369,7 +369,11 @@ export default class Restore {
             }
             // e.g. root-owned, as created by Appwrite's installer. the image is here, it read the archive.
             if (!(await removePath(appwriteDir(), archiveImage))) {
-                throw new Error(`could not remove ${appwriteDir()}.`);
+                console.log(
+                    chalk.red('❌ Error removing Appwrite remnants:'),
+                    `could not remove ${appwriteDir()}.`,
+                );
+                return false;
             }
         } catch (error) {
             printError('Error removing Appwrite remnants:', error);

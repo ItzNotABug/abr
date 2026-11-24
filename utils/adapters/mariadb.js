@@ -28,6 +28,8 @@ export const skipped = ['ibtmp1', 'ib_logfile*'];
  * Uses the live container's image, so tool & server versions always match.
  *
  * @param database the container's `container` name, `image` & `env`.
+ * @param snapshot the volume to write into, also the sidecar's name.
+ * @param signal aborts it.
  * @throws when the snapshot fails or `signal` aborted.
  */
 export async function snapshot(database, snapshot, signal) {

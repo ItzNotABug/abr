@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { setTimeout as wait } from 'timers/promises';
+import { setTimeout as wait } from 'node:timers/promises';
 import { abrLabel, docker, dockerSync, sleepSync } from '../misc.js';
 import * as mariadb from './mariadb.js';
 import * as mongodb from './mongodb.js';
@@ -27,7 +27,10 @@ export async function inspectDatabase(container) {
 /**
  * Takes a consistent snapshot of the running database via its adapter. The caller removes the snapshot.
  *
+ * @param loader shows the progress.
  * @param database the compose `adapter`, `container` & `volume`, with {@link inspectDatabase}'s state.
+ * @param snapshot the volume to snapshot into, also the sidecar's name.
+ * @param signal aborts the snapshot.
  * @returns {Promise<boolean>} `true` if the snapshot is ready, `false` if it failed or `signal` aborted.
  */
 export async function snapshotDatabase(loader, database, snapshot, signal) {

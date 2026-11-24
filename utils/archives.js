@@ -101,6 +101,7 @@ export function listBackups() {
  * Asks for one of the given backups.
  *
  * @param files backup names, from {@link listBackups}.
+ * @param [message] the prompt's question.
  * @returns {Promise<string|null>} its path, `null` if there are none.
  */
 export async function selectBackup(files, message) {
@@ -238,7 +239,8 @@ export async function movePath(from, to) {
 /**
  * Removes a file or folder, if any. Falls back to root like {@link movePath}.
  *
- * @param image for the root fallback, e.g. one already pulled.
+ * @param target the file or folder.
+ * @param [image] for the root fallback, e.g. one already pulled.
  * @returns {Promise<boolean>} `false` if it could not be removed.
  */
 export async function removePath(target, image) {
@@ -267,6 +269,11 @@ export function removePathSync(target) {
 
 /**
  * `docker run` arguments to run a command as root in the target's directory.
+ *
+ * @param target the file or folder the command works on.
+ * @param command the command to run.
+ * @param args its arguments.
+ * @param [image] an image to use instead of the default helper.
  */
 function rootCommand(target, [command, ...args], image) {
     return helperArgs(

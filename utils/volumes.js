@@ -14,6 +14,10 @@ export async function existingVolumes(volumes) {
 }
 
 /**
+ * @typedef {{id: number, free: number}} Disk a filesystem, identified by its size, & its free bytes.
+ */
+
+/**
  * Measures the volumes & the free space where a backup writes, in KB.
  *
  * `tmp` is the container layer, where offen builds archives. `scratch` is a new volume, like the snapshot's.
@@ -22,7 +26,7 @@ export async function existingVolumes(volumes) {
  * @param volumes existing volumes.
  * @param databaseVolume the database's volume.
  * @param globs the files in it that its snapshots skip, measured as `skipped`.
- * @returns {Promise<{sizes: Map<string, number>, skipped: number, tmp: Disk, scratch: Disk, archive: Disk}>} with `Disk` as `{id, free}`.
+ * @returns {Promise<{sizes: Map<string, number>, skipped: number, tmp: Disk, scratch: Disk, archive: Disk}>}
  */
 export async function measureVolumes(volumes, databaseVolume, globs) {
     // created by ABR, `docker run -v` would create it as root.
@@ -86,9 +90,12 @@ export async function measureVolumes(volumes, databaseVolume, globs) {
 /**
  * Prints the volume sizes, `n/a` for the given volumes that don't exist.
  *
+ * @param measure from {@link measureVolumes}.
+ * @param volumes volumes to list.
  * @param excluded volumes listed as not backed up.
  */
-export function printVolumeSizes({ sizes }, volumes, excluded) {
+export function printVolumeSizes(measure, volumes, excluded) {
+    const { sizes } = measure;
     const table = new Table({
         head: [chalk.blue('Volume Name'), chalk.blue('Size')],
         colWidths: [40, 15],

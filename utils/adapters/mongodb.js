@@ -40,6 +40,8 @@ export const dumpFile = 'mongodb.archive.gz';
  * Uses the live container's image, which ships the tools. The password goes via stdin, never argv.
  *
  * @param database the container's `container` name, `image` & `env`.
+ * @param snapshot the volume to write into, also the sidecar's name.
+ * @param signal aborts it.
  * @throws when the dump fails or `signal` aborted.
  */
 export async function snapshot(database, snapshot, signal) {

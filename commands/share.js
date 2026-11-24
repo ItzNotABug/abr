@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import chalk from 'chalk';
 import * as path from 'path';
 import loading from 'loading-cli';
-import { setTimeout as wait } from 'timers/promises';
+import { setTimeout as wait } from 'node:timers/promises';
 import { handleInterrupts, printError, signalExitCode } from '../utils/misc.js';
 import {
     hashFile,
@@ -165,6 +165,8 @@ export default class Share {
     /**
      * Serves the file on localhost, exposed by a quick tunnel, until it expires or is interrupted.
      *
+     * @param share the shared file's state, see {@link Share.#prepare}.
+     * @param password for the link's Basic auth.
      * @param lifetime of the link, from when the tunnel is up.
      */
     static async #share(share, password, lifetime) {
@@ -196,6 +198,8 @@ export default class Share {
             // trycloudflare's API times out at times, a new tunnel usually works.
             const attempts = 5;
             let url = null;
+            // the last attempt's failure, if all failed.
+            let failure = null;
             for (let attempt = 1; attempt <= attempts; attempt++) {
                 if (attempt > 1) {
                     await stopTunnel(tunnel);
@@ -216,25 +220,31 @@ export default class Share {
                         tunnel.url,
                         stopped.then(() => null),
                     ]);
+                    failure = null;
                     break;
                 } catch (error) {
-                    if (attempt === attempts) throw error;
+                    failure = error;
                 }
             }
             loader.stop();
 
-            if (url && !interrupted) {
-                share.url = url;
-                share.deadline = Date.now() + lifetime;
-                printShare(share, password);
-                // the tunnel ending early stops the share too.
-                // after expiry it may end while downloads finish, which is no failure.
-                tunnel.exited.then(() =>
-                    stop(share.expired ? 'expired' : 'tunnel'),
-                );
-                timer = startCountdown(share, () => stop('expired'));
+            if (failure && !interrupted) {
+                printError('Could not share the backup:', failure);
+                process.exitCode = 1;
+            } else {
+                if (url && !interrupted) {
+                    share.url = url;
+                    share.deadline = Date.now() + lifetime;
+                    printShare(share, password);
+                    // the tunnel ending early stops the share too.
+                    // after expiry it may end while downloads finish, which is no failure.
+                    tunnel.exited.then(() =>
+                        stop(share.expired ? 'expired' : 'tunnel'),
+                    );
+                    timer = startCountdown(share, () => stop('expired'));
+                }
+                reason = await stopped;
             }
-            reason = await stopped;
         } catch (error) {
             loader.stop();
             if (interrupted) {

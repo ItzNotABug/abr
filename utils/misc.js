@@ -80,7 +80,9 @@ export const raiseOpenFiles =
 /**
  * `docker run` arguments for an ABR helper container, removed on exit. `--init` makes signals stop it.
  *
+ * @param options the container's setup.
  * @param options.extra more `docker run` flags.
+ * @param args the entrypoint's arguments.
  */
 export function helperArgs(
     {
@@ -152,6 +154,12 @@ export function handleInterrupts(onInterrupt) {
     };
 }
 
+/**
+ * Runs docker in its own process group, so Ctrl+C reaches ABR first & it stops what runs.
+ *
+ * @param args docker's arguments.
+ * @param [options] execa's options.
+ */
 export function docker(args, options = {}) {
     return execa('docker', args, { detached, ...options });
 }
@@ -165,6 +173,8 @@ export function sleepSync(ms) {
 
 /**
  * {@link docker} for a forced exit, best effort, in ABR's process group as `execaSync` can't detach.
+ *
+ * @param args docker's arguments.
  */
 export function dockerSync(args) {
     return execaSync('docker', args, {
@@ -290,6 +300,8 @@ export const composeSteps = {
 /**
  * Runs a {@link composeSteps} step on the Appwrite stack, printing how it went.
  *
+ * @param loader shows the progress.
+ * @param step the step's compose `args` & messages.
  * @param stack gets the running command as `command`, to kill it on a forced exit.
  * @returns {Promise<boolean>} whether it worked.
  */

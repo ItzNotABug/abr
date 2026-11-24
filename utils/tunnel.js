@@ -32,11 +32,19 @@ export async function prepareCloudflared() {
 }
 
 /**
+ * @typedef {object} Tunnel
+ * @property {Promise<string>} [url] resolves once Cloudflare is connected, rejects if the tunnel exits first or takes over a minute.
+ * @property {Promise<void>} [exited] resolves once cloudflared exited.
+ * @property {() => void} stop asks cloudflared to stop.
+ * @property {() => void} kill stops cloudflared at once.
+ */
+
+/**
  * Starts a Cloudflare Quick Tunnel to `http://127.0.0.1:<port>`, which needs no account or domain.
  * Only after {@link prepareCloudflared}.
  *
- * @returns {{url: Promise<string>, exited: Promise<void>, stop: () => void, kill: () => void}}
- * `url` resolves once Cloudflare is connected, rejects if the tunnel exits first or takes over a minute.
+ * @param port the local port to expose.
+ * @returns {Tunnel}
  */
 export function startTunnel(port) {
     const quick = cloudflared.Tunnel.quick(`http://127.0.0.1:${port}`, {
@@ -46,6 +54,7 @@ export function startTunnel(port) {
     });
 
     const output = [];
+    /** @type {Tunnel} */
     const tunnel = {
         stop: () => quick.stop(),
         kill: () => quick.process.kill('SIGKILL'),

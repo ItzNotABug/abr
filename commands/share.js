@@ -63,6 +63,9 @@ export default class Share {
 
     /**
      * Starts task once yargs receives the command.
+     *
+     * @param {object} argv yargs' parsed arguments.
+     * @param {string} argv.expires the link's lifetime, e.g. `30m`.
      */
     static async #performTask({ expires }) {
         const lifetime = parseDuration(expires);
@@ -85,10 +88,12 @@ export default class Share {
         }
 
         const { token, password, credentials } = newCredentials();
+        /** @type {Share} */
         const share = {
             file,
             name: path.basename(file),
-            ...prepared,
+            sha256: prepared.sha256,
+            size: prepared.size,
             token,
             credentials,
             deadline: 0,
@@ -146,6 +151,7 @@ export default class Share {
     /**
      * Prepares cloudflared & hashes the file.
      *
+     * @param {string} file the backup to share.
      * @returns {Promise<{sha256: string, size: number}|null>} `null` with the reason printed on failure.
      */
     static async #prepare(file) {
@@ -165,9 +171,9 @@ export default class Share {
     /**
      * Serves the file on localhost, exposed by a quick tunnel, until it expires or is interrupted.
      *
-     * @param share the shared file's state, see {@link Share.#prepare}.
-     * @param password for the link's Basic auth.
-     * @param lifetime of the link, from when the tunnel is up.
+     * @param {Share} share the shared file & its link.
+     * @param {string} password for the link's Basic auth.
+     * @param {number} lifetime of the link in milliseconds, from when the tunnel is up.
      */
     static async #share(share, password, lifetime) {
         let server;
@@ -293,7 +299,7 @@ function printShare(share, password) {
 }
 
 /**
- * @param reason what stopped the share, nothing to print for errors.
+ * @param {string} [reason] what stopped the share, nothing to print for errors.
  */
 function printStopped(reason) {
     if (reason === 'expired') {
@@ -313,6 +319,9 @@ function printStopped(reason) {
 /**
  * Updates the status line every second. At the deadline, new requests are refused
  * & `expire` is called once running downloads finished, or took too long.
+ *
+ * @param {Share} share the shared file & its link.
+ * @param {() => void} expire called once at the deadline.
  */
 function startCountdown(share, expire) {
     status(share);
@@ -341,6 +350,8 @@ function startCountdown(share, expire) {
 
 /**
  * The live status line, on terminals only.
+ *
+ * @param {Share} share the shared file & its link.
  */
 function status(share) {
     if (!process.stdout.isTTY || !share.url || share.done) return;
@@ -362,6 +373,9 @@ function clearStatus() {
 
 /**
  * Prints above the status line.
+ *
+ * @param {Share} share the shared file & its link.
+ * @param {string} message the line to print.
  */
 function log(share, message) {
     // e.g. downloads cut off by the stop, the terminal may be gone.
@@ -373,6 +387,8 @@ function log(share, message) {
 
 /**
  * Milliseconds of a duration like `90s`, `30m` or `1h30m`, `null` if invalid or over the maximum.
+ *
+ * @param {string} text e.g. `30m`.
  */
 function parseDuration(text) {
     const match = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(
@@ -387,6 +403,8 @@ function parseDuration(text) {
 
 /**
  * Formats remaining milliseconds as `h:mm:ss` or `m:ss`.
+ *
+ * @param {number} ms milliseconds left.
  */
 function formatRemaining(ms) {
     const total = Math.max(0, Math.ceil(ms / 1000));

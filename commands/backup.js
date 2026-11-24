@@ -66,6 +66,9 @@ export default class Backup {
 
     /**
      * Starts task once yargs receives the command.
+     *
+     * @param {object} argv yargs' parsed arguments.
+     * @param {boolean} argv.encrypt encrypts the backup with a passphrase.
      */
     static async #performTask({ encrypt }) {
         if (
@@ -178,11 +181,11 @@ export default class Backup {
     /**
      * Performs the backup of appwrite volumes.
      *
-     * @param type the type's value, from {@link backupTypes}.
-     * @param database the database's `adapter`, `container` & `volume` names.
-     * @param volumes the existing Appwrite volumes.
-     * @param measure volume sizes & free disk space, from {@link measureVolumes}.
-     * @param passphrase encrypts the archive, if any.
+     * @param {string} type the type's value, from {@link backupTypes}.
+     * @param {Database} database the database's `adapter`, `container` & `volume` names.
+     * @param {string[]} volumes the existing Appwrite volumes.
+     * @param {Measure} measure volume sizes & free disk space, from {@link measureVolumes}.
+     * @param {string} passphrase encrypts the archive, if any.
      */
     static async #performBackup(type, database, volumes, measure, passphrase) {
         const { name } = database.adapter;
@@ -261,7 +264,10 @@ export default class Backup {
                 hot &&
                 !(await snapshotDatabase(
                     loader,
-                    { ...database, ...state },
+                    /** @type {Database & ContainerState} */ ({
+                        ...database,
+                        ...state,
+                    }),
                     snapshot,
                     signal,
                 ))
@@ -336,6 +342,8 @@ export default class Backup {
     /**
      * Stops or pauses Appwrite as per the backup type, marked in `stack` to bring it back after.
      *
+     * @param {string} type the backup type's value.
+     * @param {Stack} stack marked with what was stopped or paused.
      * @returns {Promise<boolean>} `false` if that failed.
      */
     static async #stopAppwrite(type, stack) {
@@ -354,6 +362,8 @@ export default class Backup {
 
     /**
      * Tells how to bring Appwrite back, when a failure or forced exit leaves it stopped or paused.
+     *
+     * @param {Stack} stack what was stopped or paused.
      */
     static #warnAppwriteDown(stack) {
         if (!stack.stopped && !stack.paused) return;
@@ -371,14 +381,14 @@ export default class Backup {
     /**
      * Archives the volumes.
      *
-     * @param options what to archive & how.
-     * @param options.volumes volumes to archive.
-     * @param options.files files to archive from the `appwrite` folder.
-     * @param options.replace volumes to archive from another volume, e.g. the database's snapshot.
-     * @param options.archive name for the archive container, to stop it on failure or interrupt.
-     * @param options.file path of the archive to create.
-     * @param options.passphrase encrypts the archive via GPG, if any.
-     * @param options.signal aborts the archiving.
+     * @param {object} options what to archive & how.
+     * @param {string[]} options.volumes volumes to archive.
+     * @param {string[]} options.files files to archive from the `appwrite` folder.
+     * @param {Object<string, string>|false} options.replace volumes to archive from another volume, e.g. the database's snapshot.
+     * @param {string} options.archive name for the archive container, to stop it on failure or interrupt.
+     * @param {string} options.file path of the archive to create.
+     * @param {string} options.passphrase encrypts the archive via GPG, if any.
+     * @param {AbortSignal} options.signal aborts the archiving.
      * @returns {Promise<boolean>} `true` if the archive was created.
      */
     static async #archiveVolumes({

@@ -23,9 +23,9 @@ export async function prepareCloudflared() {
     });
     if (!failed) return;
     await cloudflared.install(cloudflared.bin);
-    const installed = await execa(cloudflared.bin, ['--version'], {
-        reject: false,
-    });
+    const installed = /** @type {{failed: boolean}} */ (
+        await execa(cloudflared.bin, ['--version'], { reject: false })
+    );
     if (installed.failed) {
         throw new Error('the cloudflared install failed, try again.');
     }
@@ -43,7 +43,7 @@ export async function prepareCloudflared() {
  * Starts a Cloudflare Quick Tunnel to `http://127.0.0.1:<port>`, which needs no account or domain.
  * Only after {@link prepareCloudflared}.
  *
- * @param port the local port to expose.
+ * @param {number} port the local port to expose.
  * @returns {Tunnel}
  */
 export function startTunnel(port) {
@@ -115,6 +115,8 @@ export function startTunnel(port) {
 
 /**
  * Stops the tunnel & waits for it to exit.
+ *
+ * @param {Tunnel} tunnel the tunnel to stop.
  */
 export async function stopTunnel(tunnel) {
     tunnel.stop();

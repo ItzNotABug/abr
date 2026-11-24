@@ -53,6 +53,9 @@ export const installFiles = ['.env', 'docker-compose.yml'];
 
 /**
  * A variable's value from the `KEY=value` list of `docker inspect`.
+ *
+ * @param {string[]} env `KEY=value` lines.
+ * @param {string} key the variable.
  */
 export function envValue(env, key) {
     return env
@@ -80,9 +83,15 @@ export const raiseOpenFiles =
 /**
  * `docker run` arguments for an ABR helper container, removed on exit. `--init` makes signals stop it.
  *
- * @param options the container's setup.
- * @param options.extra more `docker run` flags.
- * @param args the entrypoint's arguments.
+ * @param {object} options the container's setup.
+ * @param {string} options.entrypoint the command to run.
+ * @param {string[]} [options.mounts] `-v` mounts.
+ * @param {string[]} [options.env] variables passed from ABR's environment.
+ * @param {string} [options.name] the container's name.
+ * @param {string} [options.workdir] its working directory.
+ * @param {string[]} [options.extra] more `docker run` flags.
+ * @param {string} [options.image] the image, ABR's helper by default.
+ * @param {...string} args the entrypoint's arguments.
  */
 export function helperArgs(
     {
@@ -135,6 +144,9 @@ let detached = false;
 /**
  * Routes interrupts to `onInterrupt(signal)` until the returned `release` is called.
  * Meanwhile docker commands run detached & write errors of a hung up terminal are ignored.
+ *
+ * @param {(signal: string) => void} onInterrupt called with the signal's name.
+ * @returns {() => void}
  */
 export function handleInterrupts(onInterrupt) {
     // `on`, not `once`: execa's exit hook re-raises the signal if no other listener is left.
@@ -155,10 +167,23 @@ export function handleInterrupts(onInterrupt) {
 }
 
 /**
+ * A running docker command: awaited for its result, iterated for its output lines, or killed.
+ *
+ * @typedef {Promise<{stdout: string, stderr: string, failed: boolean, exitCode?: number, signal?: string}> & AsyncIterable<string> & {kill: (signal?: string) => boolean}} Command
+ */
+
+/**
+ * The spinner, from `loading-cli`.
+ *
+ * @typedef {{start: (text?: string) => Loader, stop: () => Loader, text: string}} Loader
+ */
+
+/**
  * Runs docker in its own process group, so Ctrl+C reaches ABR first & it stops what runs.
  *
- * @param args docker's arguments.
- * @param [options] execa's options.
+ * @param {string[]} args docker's arguments.
+ * @param {object} [options] execa's options.
+ * @returns {Command}
  */
 export function docker(args, options = {}) {
     return execa('docker', args, { detached, ...options });
@@ -166,27 +191,37 @@ export function docker(args, options = {}) {
 
 /**
  * Blocks for `ms`, in a forced exit nothing async runs anymore.
+ *
+ * @param {number} ms milliseconds to block.
  */
 export function sleepSync(ms) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    const view = new Int32Array(
+        /** @type {ArrayBuffer} */ (new SharedArrayBuffer(4)),
+    );
+    Atomics.wait(view, 0, 0, ms);
 }
 
 /**
  * {@link docker} for a forced exit, best effort, in ABR's process group as `execaSync` can't detach.
  *
- * @param args docker's arguments.
+ * @param {string[]} args docker's arguments.
+ * @returns {{stdout: string, stderr: string, failed: boolean}}
  */
 export function dockerSync(args) {
-    return execaSync('docker', args, {
-        reject: false,
-        timeout: 5000,
-        // a child ignoring the default SIGTERM would keep blocking the exit.
-        killSignal: 'SIGKILL',
-    });
+    return /** @type {{stdout: string, stderr: string, failed: boolean}} */ (
+        execaSync('docker', args, {
+            reject: false,
+            timeout: 5000,
+            // a child ignoring the default SIGTERM would keep blocking the exit.
+            killSignal: 'SIGKILL',
+        })
+    );
 }
 
 /**
  * Pulls the image if it isn't present yet. Throws on failure.
+ *
+ * @param {string} image the image to pull.
  */
 export async function pullImage(image) {
     const { failed } = await docker(['image', 'inspect', image], {
@@ -197,6 +232,9 @@ export async function pullImage(image) {
 
 /**
  * Prints an error under `title`, with docker's own words if it came from a command.
+ *
+ * @param {string} title what failed.
+ * @param {Error & {stderr?: string, exitCode?: number, signal?: string}} error the failure, a command's with its stderr.
  */
 export function printError(title, error) {
     const stderr = error.stderr?.trim();
@@ -211,6 +249,8 @@ export function printError(title, error) {
 
 /**
  * The shell's exit code for a process ended by `signal`, e.g. 130 for `SIGINT`.
+ *
+ * @param {string} signal the signal's name.
  */
 export function signalExitCode(signal) {
     return 128 + os.constants.signals[signal];
@@ -236,6 +276,8 @@ export const backupTypes = [
 
 /**
  * Checks if `Docker` is installed and running.
+ *
+ * @param {Loader} loader shows the progress.
  */
 export async function checkDocker(loader) {
     loader.start('Checking if available Docker...');
@@ -263,6 +305,18 @@ export async function checkDocker(loader) {
         return false;
     }
 }
+
+/**
+ * A compose command on the Appwrite stack & what to print for it.
+ *
+ * @typedef {{args: string[], start: string, done: string, failed: string, harmless?: string}} ComposeStep
+ */
+
+/**
+ * What a backup changed on the Appwrite stack, to bring it back after.
+ *
+ * @typedef {{stopped?: boolean, paused?: boolean, command?: Command|null}} Stack
+ */
 
 /**
  * `docker compose` steps on the Appwrite stack, for {@link runCompose}.
@@ -300,9 +354,9 @@ export const composeSteps = {
 /**
  * Runs a {@link composeSteps} step on the Appwrite stack, printing how it went.
  *
- * @param loader shows the progress.
- * @param step the step's compose `args` & messages.
- * @param stack gets the running command as `command`, to kill it on a forced exit.
+ * @param {Loader} loader shows the progress.
+ * @param {ComposeStep} step the step's compose `args` & messages.
+ * @param {Stack} [stack] gets the running command as `command`, to kill it on a forced exit.
  * @returns {Promise<boolean>} whether it worked.
  */
 export async function runCompose(

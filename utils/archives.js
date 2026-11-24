@@ -27,6 +27,8 @@ export function isEncrypted(file) {
 
 /**
  * Returns an unused path for a new backup archive.
+ *
+ * @param {boolean} encrypted whether the archive gets `.gpg`.
  */
 export function newBackupFile(encrypted) {
     // may be gone since measured, `docker run -v` would create it as root.
@@ -52,6 +54,8 @@ export function newBackupFile(encrypted) {
 
 /**
  * The file's SHA-256, in hex.
+ *
+ * @param {string} file the file to hash.
  */
 export async function hashFile(file) {
     const hash = crypto.createHash('sha256');
@@ -62,6 +66,8 @@ export async function hashFile(file) {
 /**
  * Whether the file starts like a passphrase encrypted OpenPGP message, as GPG archives do.
  * A renamed plain archive starts with gzip's header instead.
+ *
+ * @param {string} file the file to check.
  */
 export function startsAsOpenPGP(file) {
     const header = Buffer.alloc(1);
@@ -100,7 +106,8 @@ export function listBackups() {
 /**
  * Asks for one of the given backups.
  *
- * @param files backup names, from {@link listBackups}.
+ * @param {string[]} files backup names, from {@link listBackups}.
+ * @param {string} [message] the prompt's question.
  * @returns {Promise<string|null>} its path, `null` if there are none.
  */
 export async function selectBackup(files, message) {
@@ -146,7 +153,7 @@ export async function selectBackup(files, message) {
  * The passphrase of encrypted backups, from `ABR_GPG_PASSPHRASE` or a prompt.
  * Single line only, GPG reads passphrases up to the first line break.
  *
- * @param confirm asks twice, for new backups.
+ * @param {boolean} [confirm] asks twice, for new backups.
  * @returns {Promise<string|null>} `null` with the reason printed if the variable is unusable.
  */
 export async function readPassphrase(confirm = false) {
@@ -190,6 +197,8 @@ export async function readPassphrase(confirm = false) {
 
 /**
  * Where an archive is written until it's complete, not listed by restores.
+ *
+ * @param {string} file the archive's final path.
  */
 export function partialFile(file) {
     return path.join(path.dirname(file), `.partial-${path.basename(file)}`);
@@ -197,6 +206,8 @@ export function partialFile(file) {
 
 /**
  * offen's name for a `partial` before it appends `.gpg`: a plain archive, if it got no passphrase.
+ *
+ * @param {string} partial the encrypted partial path.
  */
 export function plainPartial(partial) {
     return partial.replace(/\.gpg$/, '');
@@ -223,6 +234,9 @@ export function warnPartialArchives() {
 
 /**
  * Renames a file, falls back to root via a container as archives & install files may be owned by root.
+ *
+ * @param {string} from the current path.
+ * @param {string} to the new path.
  */
 export async function movePath(from, to) {
     try {
@@ -238,7 +252,8 @@ export async function movePath(from, to) {
 /**
  * Removes a file or folder, if any. Falls back to root like {@link movePath}.
  *
- * @param image for the root fallback, e.g. one already pulled.
+ * @param {string} target the file or folder.
+ * @param {string} [image] for the root fallback, e.g. one already pulled.
  * @returns {Promise<boolean>} `false` if it could not be removed.
  */
 export async function removePath(target, image) {
@@ -256,6 +271,8 @@ export async function removePath(target, image) {
 
 /**
  * {@link removePath} for a forced exit.
+ *
+ * @param {string} target the file or folder.
  */
 export function removePathSync(target) {
     try {
@@ -267,6 +284,11 @@ export function removePathSync(target) {
 
 /**
  * `docker run` arguments to run a command as root in the target's directory.
+ *
+ * @param {string} target the file or folder the command works on.
+ * @param {string} command the command to run.
+ * @param {string[]} args its arguments.
+ * @param {string} [image] an image to use instead of the default helper.
  */
 function rootCommand(target, [command, ...args], image) {
     return helperArgs(

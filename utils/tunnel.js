@@ -23,20 +23,28 @@ export async function prepareCloudflared() {
     });
     if (!failed) return;
     await cloudflared.install(cloudflared.bin);
-    const installed = await execa(cloudflared.bin, ['--version'], {
-        reject: false,
-    });
+    const installed = /** @type {{failed: boolean}} */ (
+        await execa(cloudflared.bin, ['--version'], { reject: false })
+    );
     if (installed.failed) {
         throw new Error('the cloudflared install failed, try again.');
     }
 }
 
 /**
+ * @typedef {object} Tunnel
+ * @property {Promise<string>} [url] resolves once Cloudflare is connected, rejects if the tunnel exits first or takes over a minute.
+ * @property {Promise<void>} [exited] resolves once cloudflared exited.
+ * @property {() => void} stop asks cloudflared to stop.
+ * @property {() => void} kill stops cloudflared at once.
+ */
+
+/**
  * Starts a Cloudflare Quick Tunnel to `http://127.0.0.1:<port>`, which needs no account or domain.
  * Only after {@link prepareCloudflared}.
  *
- * @returns {{url: Promise<string>, exited: Promise<void>, stop: () => void, kill: () => void}}
- * `url` resolves once Cloudflare is connected, rejects if the tunnel exits first or takes over a minute.
+ * @param {number} port the local port to expose.
+ * @returns {Tunnel}
  */
 export function startTunnel(port) {
     const quick = cloudflared.Tunnel.quick(`http://127.0.0.1:${port}`, {
@@ -46,6 +54,7 @@ export function startTunnel(port) {
     });
 
     const output = [];
+    /** @type {Tunnel} */
     const tunnel = {
         stop: () => quick.stop(),
         kill: () => quick.process.kill('SIGKILL'),
@@ -106,6 +115,8 @@ export function startTunnel(port) {
 
 /**
  * Stops the tunnel & waits for it to exit.
+ *
+ * @param {Tunnel} tunnel the tunnel to stop.
  */
 export async function stopTunnel(tunnel) {
     tunnel.stop();

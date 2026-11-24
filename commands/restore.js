@@ -31,6 +31,8 @@ import { cacheVolumes, readCompose } from '../utils/compose.js';
 import { existingVolumes } from '../utils/volumes.js';
 import { acquireLock } from '../utils/lock.js';
 
+/** @typedef {import('../utils/adapters/index.js').Adapter} Adapter */
+
 const loader = loading('');
 
 /**
@@ -166,8 +168,9 @@ export default class Restore {
     /**
      * Reads the whole archive, which also checks its compression & encryption.
      *
-     * @param passphrase decrypts the archive, if encrypted.
-     * @returns {Promise<{volumes: string[], dump: object|null}|null>} the volumes in it & the adapter of the database dump it holds,
+     * @param {string} file the backup's path.
+     * @param {string} passphrase decrypts the archive, if encrypted.
+     * @returns {Promise<{volumes: string[], dump: Adapter|null}|null>} the volumes in it & the adapter of the database dump it holds,
      * if any. `null` with the reason printed if it's unusable.
      */
     static async #readArchive(file, passphrase) {
@@ -200,15 +203,14 @@ export default class Restore {
                 const [root, dir, child] = parts;
 
                 // GNU tar skips `..` members & fails, after the install is gone.
+                // `backup` itself has no `dir`.
                 if (root !== 'backup' || parts.includes('..')) {
                     unexpected.add(name);
-                } else if (!dir) {
-                    continue;
                 } else if (dir === 'appwrite') {
                     // bind-mounted to the host & read by compose, ABR only writes install files there, nothing nested.
                     if (parts.length > 3) unexpected.add(name);
                     else if (child) files.add(child);
-                } else if (appwriteVolumeName.test(dir)) {
+                } else if (dir && appwriteVolumeName.test(dir)) {
                     // names become `docker run -v` sources & are removed first, so only Appwrite's own volumes.
                     volumes.add(dir);
                     if (!child) continue;
@@ -218,7 +220,7 @@ export default class Restore {
                     } else {
                         filled.add(dir);
                     }
-                } else {
+                } else if (dir) {
                     unexpected.add(`backup/${dir}`);
                 }
             }
@@ -274,6 +276,8 @@ export default class Restore {
 
     /**
      * Loads the database dump of a hot backup, after it was extracted. Appwrite's other services stay stopped.
+     *
+     * @param {Adapter} adapter the dump's database.
      */
     static async #restoreDump(adapter) {
         loader.start(chalk.blue(`Restoring the ${adapter.name} dump...`));
@@ -295,6 +299,7 @@ export default class Restore {
     /**
      * Removes the install's containers & volumes, the volumes the backup restores & the `appwrite` folder, once confirmed.
      *
+     * @param {string[]} volumes the volumes the backup restores.
      * @returns {Promise<boolean>} `false` if declined or failed.
      */
     static async #removeRemnants(volumes) {
@@ -369,7 +374,11 @@ export default class Restore {
             }
             // e.g. root-owned, as created by Appwrite's installer. the image is here, it read the archive.
             if (!(await removePath(appwriteDir(), archiveImage))) {
-                throw new Error(`could not remove ${appwriteDir()}.`);
+                console.log(
+                    chalk.red('❌ Error removing Appwrite remnants:'),
+                    `could not remove ${appwriteDir()}.`,
+                );
+                return false;
             }
         } catch (error) {
             printError('Error removing Appwrite remnants:', error);
@@ -384,6 +393,8 @@ export default class Restore {
      * The install's containers by its compose project, Appwrite's volumes of it, plus the volumes the backup restores.
      * Volumes list the `users` outside the install that would block their removal.
      * Cache volumes, which aren't backed up, are kept unless the backup has them.
+     *
+     * @param {string[]} volumes the volumes the backup restores.
      */
     static async #findRemnants(volumes) {
         const compose = fs.existsSync(appwriteDir())
@@ -397,6 +408,7 @@ export default class Restore {
             ...(compose?.excluded ?? []),
         ].filter((volume) => !volumes.includes(volume));
 
+        /** @type {(args: string[]) => Promise<string[]>} */
         const list = async (args) =>
             (await docker(args)).stdout.split('\n').filter(Boolean);
         // volumes created by restores have no compose labels, so also the ones the install, backup & older installs name.
@@ -452,6 +464,10 @@ export default class Restore {
 
     /**
      * Extracts the archive straight into the volumes & the `appwrite` folder, as root to keep file owners.
+     *
+     * @param {string} file the backup's path.
+     * @param {string[]} volumes the volumes in it.
+     * @param {string} passphrase decrypts the archive, if encrypted.
      */
     static async #extractArchive(file, volumes, passphrase) {
         this.#phase = 'changing';
@@ -514,6 +530,11 @@ export default class Restore {
     /**
      * `docker run` arguments for a `script` reading the archive via `archive_tar "$1" <tar args>`, other `args` follow as `$2`...
      * Encrypted archives read the passphrase from stdin, as env `docker inspect` would show it.
+     *
+     * @param {string} file the backup's path.
+     * @param {string[]} mounts `docker run -v` mounts.
+     * @param {string} script the bash script to run.
+     * @param {...string} args the script's arguments after the archive.
      */
     static #archiveScriptArgs(file, mounts, script, ...args) {
         return helperArgs(

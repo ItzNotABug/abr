@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import chalk from 'chalk';
 import * as path from 'path';
 import loading from 'loading-cli';
-import { setTimeout as wait } from 'timers/promises';
+import { setTimeout as wait } from 'node:timers/promises';
 import { handleInterrupts, printError, signalExitCode } from '../utils/misc.js';
 import {
     hashFile,
@@ -23,6 +23,8 @@ import {
     stopTunnel,
 } from '../utils/tunnel.js';
 import { formatSize } from '../utils/volumes.js';
+
+/** @typedef {import('../utils/share-server.js').ShareState} ShareState */
 
 const loader = loading('');
 
@@ -63,6 +65,9 @@ export default class Share {
 
     /**
      * Starts task once yargs receives the command.
+     *
+     * @param {object} argv yargs' parsed arguments.
+     * @param {string} argv.expires the link's lifetime, e.g. `30m`.
      */
     static async #performTask({ expires }) {
         const lifetime = parseDuration(expires);
@@ -85,10 +90,12 @@ export default class Share {
         }
 
         const { token, password, credentials } = newCredentials();
+        /** @type {ShareState} */
         const share = {
             file,
             name: path.basename(file),
-            ...prepared,
+            sha256: prepared.sha256,
+            size: prepared.size,
             token,
             credentials,
             deadline: 0,
@@ -146,6 +153,7 @@ export default class Share {
     /**
      * Prepares cloudflared & hashes the file.
      *
+     * @param {string} file the backup to share.
      * @returns {Promise<{sha256: string, size: number}|null>} `null` with the reason printed on failure.
      */
     static async #prepare(file) {
@@ -165,7 +173,9 @@ export default class Share {
     /**
      * Serves the file on localhost, exposed by a quick tunnel, until it expires or is interrupted.
      *
-     * @param lifetime of the link, from when the tunnel is up.
+     * @param {ShareState} share the shared file & its link.
+     * @param {string} password for the link's Basic auth.
+     * @param {number} lifetime of the link in milliseconds, from when the tunnel is up.
      */
     static async #share(share, password, lifetime) {
         let server;
@@ -196,6 +206,8 @@ export default class Share {
             // trycloudflare's API times out at times, a new tunnel usually works.
             const attempts = 5;
             let url = null;
+            // the last attempt's failure, if all failed.
+            let failure = null;
             for (let attempt = 1; attempt <= attempts; attempt++) {
                 if (attempt > 1) {
                     await stopTunnel(tunnel);
@@ -216,25 +228,31 @@ export default class Share {
                         tunnel.url,
                         stopped.then(() => null),
                     ]);
+                    failure = null;
                     break;
                 } catch (error) {
-                    if (attempt === attempts) throw error;
+                    failure = error;
                 }
             }
             loader.stop();
 
-            if (url && !interrupted) {
-                share.url = url;
-                share.deadline = Date.now() + lifetime;
-                printShare(share, password);
-                // the tunnel ending early stops the share too.
-                // after expiry it may end while downloads finish, which is no failure.
-                tunnel.exited.then(() =>
-                    stop(share.expired ? 'expired' : 'tunnel'),
-                );
-                timer = startCountdown(share, () => stop('expired'));
+            if (failure && !interrupted) {
+                printError('Could not share the backup:', failure);
+                process.exitCode = 1;
+            } else {
+                if (url && !interrupted) {
+                    share.url = url;
+                    share.deadline = Date.now() + lifetime;
+                    printShare(share, password);
+                    // the tunnel ending early stops the share too.
+                    // after expiry it may end while downloads finish, which is no failure.
+                    tunnel.exited.then(() =>
+                        stop(share.expired ? 'expired' : 'tunnel'),
+                    );
+                    timer = startCountdown(share, () => stop('expired'));
+                }
+                reason = await stopped;
             }
-            reason = await stopped;
         } catch (error) {
             loader.stop();
             if (interrupted) {
@@ -283,7 +301,7 @@ function printShare(share, password) {
 }
 
 /**
- * @param reason what stopped the share, nothing to print for errors.
+ * @param {string} [reason] what stopped the share, nothing to print for errors.
  */
 function printStopped(reason) {
     if (reason === 'expired') {
@@ -303,6 +321,9 @@ function printStopped(reason) {
 /**
  * Updates the status line every second. At the deadline, new requests are refused
  * & `expire` is called once running downloads finished, or took too long.
+ *
+ * @param {ShareState} share the shared file & its link.
+ * @param {() => void} expire called once at the deadline.
  */
 function startCountdown(share, expire) {
     status(share);
@@ -331,6 +352,8 @@ function startCountdown(share, expire) {
 
 /**
  * The live status line, on terminals only.
+ *
+ * @param {ShareState} share the shared file & its link.
  */
 function status(share) {
     if (!process.stdout.isTTY || !share.url || share.done) return;
@@ -352,6 +375,9 @@ function clearStatus() {
 
 /**
  * Prints above the status line.
+ *
+ * @param {ShareState} share the shared file & its link.
+ * @param {string} message the line to print.
  */
 function log(share, message) {
     // e.g. downloads cut off by the stop, the terminal may be gone.
@@ -363,6 +389,8 @@ function log(share, message) {
 
 /**
  * Milliseconds of a duration like `90s`, `30m` or `1h30m`, `null` if invalid or over the maximum.
+ *
+ * @param {string} text e.g. `30m`.
  */
 function parseDuration(text) {
     const match = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(
@@ -377,6 +405,8 @@ function parseDuration(text) {
 
 /**
  * Formats remaining milliseconds as `h:mm:ss` or `m:ss`.
+ *
+ * @param {number} ms milliseconds left.
  */
 function formatRemaining(ms) {
     const total = Math.max(0, Math.ceil(ms / 1000));

@@ -6,6 +6,8 @@ import { docker, helperArgs } from './misc.js';
 
 /**
  * The given volumes that exist, `docker run -v` would create the others.
+ *
+ * @param {string[]} volumes the volumes to check.
  */
 export async function existingVolumes(volumes) {
     const { stdout } = await docker(['volume', 'ls', '--format', '{{.Name}}']);
@@ -14,15 +16,25 @@ export async function existingVolumes(volumes) {
 }
 
 /**
+ * @typedef {{id: number, free: number}} Disk a filesystem, identified by its size, & its free bytes.
+ */
+
+/**
+ * Volume sizes in KB & free space on the disks a backup writes to, from {@link measureVolumes}.
+ *
+ * @typedef {{sizes: Map<string, number>, skipped: number, tmp: Disk, scratch: Disk, archive: Disk}} Measure
+ */
+
+/**
  * Measures the volumes & the free space where a backup writes, in KB.
  *
  * `tmp` is the container layer, where offen builds archives. `scratch` is a new volume, like the snapshot's.
  * Filesystems are identified by their size: the overlay `/tmp` & btrfs subvolumes report other ids for the same disk.
  *
- * @param volumes existing volumes.
- * @param databaseVolume the database's volume.
- * @param globs the files in it that its snapshots skip, measured as `skipped`.
- * @returns {Promise<{sizes: Map<string, number>, skipped: number, tmp: Disk, scratch: Disk, archive: Disk}>} with `Disk` as `{id, free}`.
+ * @param {string[]} volumes existing volumes.
+ * @param {string} databaseVolume the database's volume.
+ * @param {string[]} globs the files in it that its snapshots skip, measured as `skipped`.
+ * @returns {Promise<Measure>}
  */
 export async function measureVolumes(volumes, databaseVolume, globs) {
     // created by ABR, `docker run -v` would create it as root.
@@ -86,9 +98,12 @@ export async function measureVolumes(volumes, databaseVolume, globs) {
 /**
  * Prints the volume sizes, `n/a` for the given volumes that don't exist.
  *
- * @param excluded volumes listed as not backed up.
+ * @param {Measure} measure from {@link measureVolumes}.
+ * @param {string[]} volumes volumes to list.
+ * @param {string[]} excluded volumes listed as not backed up.
  */
-export function printVolumeSizes({ sizes }, volumes, excluded) {
+export function printVolumeSizes(measure, volumes, excluded) {
+    const { sizes } = measure;
     const table = new Table({
         head: [chalk.blue('Volume Name'), chalk.blue('Size')],
         colWidths: [40, 15],
@@ -113,11 +128,11 @@ export function printVolumeSizes({ sizes }, volumes, excluded) {
  * Required: the snapshot & its compressed copy, at most its size, on Docker's disk next to the live database.
  * The whole archive is estimated without compression, so the user may go ahead anyway.
  *
- * @param measure from {@link measureVolumes}.
- * @param databaseVolume the database's volume.
- * @param snapshotted whether the database is snapshotted first, which skips the measured `skipped` files.
- * @param encrypted whether the archive is encrypted, offen keeps both copies in its `/tmp` meanwhile.
- * @param dumped whether the snapshot is a compressed dump, the volume's size then covers it & its archived copy.
+ * @param {Measure} measure from {@link measureVolumes}.
+ * @param {string} databaseVolume the database's volume.
+ * @param {boolean} snapshotted whether the database is snapshotted first, which skips the measured `skipped` files.
+ * @param {boolean} encrypted whether the archive is encrypted, offen keeps both copies in its `/tmp` meanwhile.
+ * @param {boolean} dumped whether the snapshot is a compressed dump, the volume's size then covers it & its archived copy.
  * @returns {'ok'|'snapshot'|'archive'} what may not fit.
  */
 export function checkDiskSpace(
@@ -163,8 +178,9 @@ export function checkDiskSpace(
 /**
  * Whether the needs fit with 10% headroom, prints the first that doesn't.
  *
- * @param needs `[disk, kb]` pairs, summed per filesystem.
  * Same-size disks are summed too, with the lower free space: too strict rather than too lax.
+ *
+ * @param {Array<[Disk, number]>} needs `[disk, kb]` pairs, summed per filesystem.
  */
 function fits(needs) {
     const byDisk = new Map();

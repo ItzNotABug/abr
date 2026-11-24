@@ -39,7 +39,9 @@ export const dumpFile = 'mongodb.archive.gz';
  * Appwrite keeps running & writing, the dump only adds read load.
  * Uses the live container's image, which ships the tools. The password goes via stdin, never argv.
  *
- * @param database the container's `container` name, `image` & `env`.
+ * @param {{container: string, image: string, env: string[]}} database the container's `container` name, `image` & `env`.
+ * @param {string} snapshot the volume to write into, also the sidecar's name.
+ * @param {AbortSignal} [signal] aborts it.
  * @throws when the dump fails or `signal` aborted.
  */
 export async function snapshot(database, snapshot, signal) {
@@ -78,6 +80,8 @@ export async function snapshot(database, snapshot, signal) {
  *
  * The dump brings the users back, so the service's entrypoint skips its init & its healthcheck sets the replica set up again.
  * With auth, restoring the users would end mongorestore's own login.
+ *
+ * @param {string} service the restored install's compose service for MongoDB.
  */
 export async function restoreDump(service) {
     await docker(

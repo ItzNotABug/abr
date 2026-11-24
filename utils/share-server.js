@@ -6,6 +6,24 @@ import { pipeline } from 'stream/promises';
 import { formatSize } from './volumes.js';
 
 /**
+ * A shared backup & the state of its link.
+ *
+ * @typedef {object} ShareState
+ * @property {string} file the backup's path.
+ * @property {string} name its file name.
+ * @property {number} size its size in bytes.
+ * @property {string} sha256 its SHA-256, in hex.
+ * @property {string} token the link's secret path segment.
+ * @property {string} credentials the Basic auth `abr:<password>`.
+ * @property {number} deadline when the link expires, 0 until it works.
+ * @property {string} url the tunnel's URL, empty until it works.
+ * @property {number} active downloads in progress.
+ * @property {number} finishedAt when the last download ended.
+ * @property {boolean} expired whether new requests are refused.
+ * @property {boolean} done whether sharing stopped.
+ */
+
+/**
  * A random URL token & Basic auth password, the user is always `abr`.
  */
 export function newCredentials() {
@@ -21,9 +39,10 @@ export function newCredentials() {
  * Serves the share's info page at `/<token>/` & its file at `/<token>/<name>`, both behind Basic auth.
  * On localhost only, the tunnel shares the host's network.
  *
- * @param share `{file, name, size, sha256, token, credentials, deadline, url, active, finishedAt, expired}`.
  * `active` counts running downloads, `finishedAt` is when the last one ended, once `expired` new requests are refused.
- * @param log prints download events.
+ *
+ * @param {ShareState} share the shared file & its link.
+ * @param {(message: string) => void} log prints download events.
  */
 export async function startServer(share, log) {
     const server = http.createServer((request, response) =>
@@ -46,6 +65,8 @@ export async function startServer(share, log) {
 
 /**
  * Stops the server, along with running downloads.
+ *
+ * @param {import("node:http").Server} server the share's server.
  */
 export function stopServer(server) {
     server.closeAllConnections();
@@ -54,6 +75,8 @@ export function stopServer(server) {
 
 /**
  * A resumable download, curl asks for the password.
+ *
+ * @param {ShareState} share the shared file & its link.
  */
 export function curlCommand({ url, token, name }) {
     return `curl -fL -C - -u abr -o ${quote(name)} ${quote(`${url}/${token}/${encodeURIComponent(name)}`)}`;
@@ -61,6 +84,8 @@ export function curlCommand({ url, token, name }) {
 
 /**
  * Quotes for POSIX shells.
+ *
+ * @param {string} text the text to quote.
  */
 function quote(text) {
     return `'${text.replaceAll("'", `'\\''`)}'`;
@@ -137,6 +162,11 @@ function send(response, code, text, headers = {}, html = false) {
 
 /**
  * Sends the file, or the requested range of it to resume a download.
+ *
+ * @param {import("node:http").IncomingMessage} request the download request.
+ * @param {import("node:http").ServerResponse} response its response.
+ * @param {ShareState} share the shared file & its link.
+ * @param {(message: string) => void} log prints download events.
  */
 function download(request, response, share, log) {
     const range = parseRange(request.headers.range, share.size);
@@ -181,6 +211,8 @@ function download(request, response, share, log) {
 /**
  * A single `bytes=N-` or `bytes=N-M` range, as curl resumes with. `null` sends the whole file, as for other ranges.
  *
+ * @param {string} [header] the `Range` header.
+ * @param {number} size the file's size in bytes.
  * @returns {{start: number, end: number}|'unsatisfiable'|null}
  */
 function parseRange(header, size) {
@@ -194,6 +226,8 @@ function parseRange(header, size) {
 
 /**
  * The `user:password` of a Basic `Authorization` header, empty if none.
+ *
+ * @param {import("node:http").IncomingMessage} request the request.
  */
 function basicCredentials(request) {
     const [, encoded] =
@@ -203,6 +237,9 @@ function basicCredentials(request) {
 
 /**
  * Compares in constant time, for the token & credentials.
+ *
+ * @param {string} [a] one value.
+ * @param {string} [b] the other.
  */
 function safeEqual(a = '', b = '') {
     const digest = (value) =>
@@ -304,6 +341,9 @@ ${body}
 
 /**
  * A short error page in the share's style, for browsers.
+ *
+ * @param {string} title the page's title.
+ * @param {string} message what went wrong.
  */
 function errorPage(title, message) {
     return layout(

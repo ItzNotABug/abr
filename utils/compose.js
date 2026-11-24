@@ -4,6 +4,8 @@ import * as path from 'path';
 import { adapters } from './adapters/index.js';
 import { appwriteDir, appwriteVolumeName, docker, printError } from './misc.js';
 
+/** @typedef {import('./adapters/index.js').Database} Database */
+
 /**
  * Compose keys of volumes that aren't backed up, as they hold re-downloadable caches.
  * `appwrite-models` holds the embedding service's model weights: large, barely compressible & fetched again on start.
@@ -13,7 +15,7 @@ export const cacheVolumes = ['appwrite-models'];
 /**
  * Reads the Appwrite install's compose config, resolved by compose itself: `.env`, shell overrides, quoting & comments.
  *
- * @returns {Promise<{project: string, database: {adapter: object|null, service: string|undefined, container: string|undefined, volume: string|undefined, files: string[]}, volumes: string[], excluded: string[], others: string[]}>}
+ * @returns {Promise<{project: string, database: Database, volumes: string[], excluded: string[], others: string[]}>}
  * `database` is the service of the `_APP_DB_ADAPTER`, its `adapter` from {@link adapters} or `null` if unsupported.
  * Its `files` are the ones it mounts from the `appwrite` folder, archived with it.
  * `volumes` are Appwrite's volumes to back up, `excluded` its caches & `others` volumes added to the install, neither backed up.
@@ -37,7 +39,7 @@ export async function readCompose() {
     // installs before 1.9 have no adapter setting & always run MariaDB.
     const name =
         services
-            .map(([, service]) => service.environment?._APP_DB_ADAPTER)
+            .map(([, service]) => service.environment?.['_APP_DB_ADAPTER'])
             .find(Boolean) ?? 'mariadb';
     const adapter = Object.hasOwn(adapters, name) ? adapters[name] : null;
     const [key, service] =
@@ -131,6 +133,8 @@ export async function readBackupCompose() {
 
 /**
  * Whether `target` is a regular file, `false` if it can't be read, e.g. mounted from a folder ABR's user can't enter.
+ *
+ * @param {string} target the path to check.
  */
 function isFile(target) {
     try {

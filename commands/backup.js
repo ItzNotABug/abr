@@ -43,6 +43,11 @@ import {
     printVolumeSizes,
 } from '../utils/volumes.js';
 
+/** @typedef {import('../utils/adapters/index.js').ContainerState} ContainerState */
+/** @typedef {import('../utils/adapters/index.js').Database} Database */
+/** @typedef {import('../utils/volumes.js').Measure} Measure */
+/** @typedef {import('../utils/misc.js').Stack} Stack */
+
 const loader = loading('');
 
 export default class Backup {

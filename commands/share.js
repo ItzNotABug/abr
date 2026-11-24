@@ -24,6 +24,8 @@ import {
 } from '../utils/tunnel.js';
 import { formatSize } from '../utils/volumes.js';
 
+/** @typedef {import('../utils/share-server.js').ShareState} ShareState */
+
 const loader = loading('');
 
 /**
@@ -88,7 +90,7 @@ export default class Share {
         }
 
         const { token, password, credentials } = newCredentials();
-        /** @type {Share} */
+        /** @type {ShareState} */
         const share = {
             file,
             name: path.basename(file),
@@ -171,7 +173,7 @@ export default class Share {
     /**
      * Serves the file on localhost, exposed by a quick tunnel, until it expires or is interrupted.
      *
-     * @param {Share} share the shared file & its link.
+     * @param {ShareState} share the shared file & its link.
      * @param {string} password for the link's Basic auth.
      * @param {number} lifetime of the link in milliseconds, from when the tunnel is up.
      */
@@ -320,7 +322,7 @@ function printStopped(reason) {
  * Updates the status line every second. At the deadline, new requests are refused
  * & `expire` is called once running downloads finished, or took too long.
  *
- * @param {Share} share the shared file & its link.
+ * @param {ShareState} share the shared file & its link.
  * @param {() => void} expire called once at the deadline.
  */
 function startCountdown(share, expire) {
@@ -351,7 +353,7 @@ function startCountdown(share, expire) {
 /**
  * The live status line, on terminals only.
  *
- * @param {Share} share the shared file & its link.
+ * @param {ShareState} share the shared file & its link.
  */
 function status(share) {
     if (!process.stdout.isTTY || !share.url || share.done) return;
@@ -374,7 +376,7 @@ function clearStatus() {
 /**
  * Prints above the status line.
  *
- * @param {Share} share the shared file & its link.
+ * @param {ShareState} share the shared file & its link.
  * @param {string} message the line to print.
  */
 function log(share, message) {

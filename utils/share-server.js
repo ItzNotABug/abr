@@ -8,7 +8,7 @@ import { formatSize } from './volumes.js';
 /**
  * A shared backup & the state of its link.
  *
- * @typedef {object} Share
+ * @typedef {object} ShareState
  * @property {string} file the backup's path.
  * @property {string} name its file name.
  * @property {number} size its size in bytes.
@@ -41,7 +41,7 @@ export function newCredentials() {
  *
  * `active` counts running downloads, `finishedAt` is when the last one ended, once `expired` new requests are refused.
  *
- * @param {Share} share the shared file & its link.
+ * @param {ShareState} share the shared file & its link.
  * @param {(message: string) => void} log prints download events.
  */
 export async function startServer(share, log) {
@@ -76,7 +76,7 @@ export function stopServer(server) {
 /**
  * A resumable download, curl asks for the password.
  *
- * @param {Share} share the shared file & its link.
+ * @param {ShareState} share the shared file & its link.
  */
 export function curlCommand({ url, token, name }) {
     return `curl -fL -C - -u abr -o ${quote(name)} ${quote(`${url}/${token}/${encodeURIComponent(name)}`)}`;
@@ -165,7 +165,7 @@ function send(response, code, text, headers = {}, html = false) {
  *
  * @param {import("node:http").IncomingMessage} request the download request.
  * @param {import("node:http").ServerResponse} response its response.
- * @param {Share} share the shared file & its link.
+ * @param {ShareState} share the shared file & its link.
  * @param {(message: string) => void} log prints download events.
  */
 function download(request, response, share, log) {

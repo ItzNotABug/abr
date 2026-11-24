@@ -4,6 +4,8 @@ import { abrLabel, docker, dockerSync, sleepSync } from '../misc.js';
 import * as mariadb from './mariadb.js';
 import * as mongodb from './mongodb.js';
 
+/** @typedef {import('../misc.js').Loader} Loader */
+
 /**
  * A database's backup & restore logic, one module per database.
  *

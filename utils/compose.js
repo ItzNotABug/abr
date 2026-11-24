@@ -4,6 +4,8 @@ import * as path from 'path';
 import { adapters } from './adapters/index.js';
 import { appwriteDir, appwriteVolumeName, docker, printError } from './misc.js';
 
+/** @typedef {import('./adapters/index.js').Database} Database */
+
 /**
  * Compose keys of volumes that aren't backed up, as they hold re-downloadable caches.
  * `appwrite-models` holds the embedding service's model weights: large, barely compressible & fetched again on start.

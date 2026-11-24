@@ -31,6 +31,8 @@ import { cacheVolumes, readCompose } from '../utils/compose.js';
 import { existingVolumes } from '../utils/volumes.js';
 import { acquireLock } from '../utils/lock.js';
 
+/** @typedef {import('../utils/adapters/index.js').Adapter} Adapter */
+
 const loader = loading('');
 
 /**
